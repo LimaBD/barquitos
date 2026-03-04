@@ -10,7 +10,7 @@ Edit these values before running the collector.
 
 # Your API key from https://aisstream.io/authenticate
 # You can also set the environment variable AISSTREAM_API_KEY instead.
-API_KEY = "d27e06655fa102392ae747901d1168affe08b48f"
+API_KEY = "9ce24db073071bf1078b798e22e44bd412191101"
 
 # WebSocket endpoint
 WS_URL = "wss://stream.aisstream.io/v0/stream"
@@ -41,7 +41,7 @@ FILTER_MESSAGE_TYPES = []
 
 # Path where raw AIS data will be stored.
 # A new JSONL file is created every minute (or per file size limit).
-DATA_OUTPUT_DIR = "data"
+DATA_OUTPUT_DIR = "/mnt/1tbdisk"
 
 # Maximum number of messages per file before rotating to a new file.
 # Set to 0 for no limit (will only rotate every minute).
