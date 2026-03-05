@@ -41,7 +41,7 @@ FILTER_MESSAGE_TYPES = []
 
 # Path where raw AIS data will be stored.
 # A new JSONL file is created every minute (or per file size limit).
-DATA_OUTPUT_DIR = "/mnt/1tbdisk"
+DATA_OUTPUT_DIR = "/mnt/wdblack"
 
 # Maximum number of messages per file before rotating to a new file.
 # Set to 0 for no limit (will only rotate every minute).
