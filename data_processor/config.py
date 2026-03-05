@@ -33,8 +33,9 @@ AIS_RAW_DIR = _COLLECTOR_OUTPUT_DIR
 # After a JSONL file is ingested it is moved here
 AIS_BACKUP_DIR = os.path.join(os.path.dirname(AIS_RAW_DIR), "ais_processed")
 
-# SQLite database file
-DATABASE_PATH = os.path.join(_project_root, "data_processor", "barquitos.db")
+# SQLite database file — stored on the external WD Black drive to avoid
+# wearing out the Raspberry Pi's SD card.
+DATABASE_PATH = os.path.join("/mnt", "wdblack", "barquitos.db")
 
 # =============================================================================
 # Ingestion settings
