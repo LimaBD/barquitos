@@ -6,10 +6,16 @@ parses each line, inserts the data into the normalised database, then
 moves the file to the backup (processed) folder.
 
 Usage:
-    python ingest_ais.py            # one-shot: process pending files then exit
-    python ingest_ais.py --watch    # loop forever, checking every 30 s
+    python -m ais_ingestor.ingest            # one-shot
+    python -m ais_ingestor.ingest --watch    # loop forever, checking every 30 s
 
-Can safely be re-run — already-ingested files are skipped.
+Can safely be re-run — already-ingested files are skipped (by checking the
+backup directory).
+
+Performance optimisations:
+  - Vessel-minimal upserts are deduplicated by MMSI.
+  - R*Tree rows are inserted in a single batch via a range sub-select.
+  - Non-commercial vessels (yachts, sailing boats) are filtered out early.
 """
 
 import argparse
@@ -21,15 +27,15 @@ import sys
 import time
 from datetime import datetime, timezone
 from glob import glob
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Ensure package imports work when running as a script
+# Ensure package imports work when running as a script or as a module
 # ---------------------------------------------------------------------------
-_here = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _here)
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
-import config  # noqa: E402
+from ais_ingestor import config  # noqa: E402
 from db import init_db  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -40,10 +46,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("ingest_ais")
+log = logging.getLogger("ais_ingestor")
 
 # ---------------------------------------------------------------------------
-# Time parsing helper
+# Time parsing helpers
 # ---------------------------------------------------------------------------
 def parse_ais_time(time_str: str) -> str:
     """
@@ -53,10 +59,7 @@ def parse_ais_time(time_str: str) -> str:
     Example output: '2026-03-04T04:34:59.795811+00:00'
     """
     try:
-        # Strip trailing " UTC" and the tz offset "+0000" → use as-is (already UTC)
-        # Python's %f only handles 6 digits, so truncate nanoseconds
         clean = time_str.replace(" UTC", "").replace(" +0000", "")
-        # Truncate fractional seconds to microseconds (6 digits)
         dot_pos = clean.find(".")
         if dot_pos != -1:
             frac = clean[dot_pos + 1:]
@@ -64,13 +67,90 @@ def parse_ais_time(time_str: str) -> str:
         dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S.%f")
         return dt.replace(tzinfo=timezone.utc).isoformat()
     except Exception:
-        return time_str  # return as-is rather than crash
+        return time_str
+
+
+def build_eta_iso(eta: dict, reference_time: str) -> str | None:
+    """
+    Combine AIS ETA fields (Month, Day, Hour, Minute) into an ISO-8601 string.
+
+    AIS doesn't transmit a year, so we infer it from the reference_time
+    (the message reception timestamp).  Returns None if the ETA is empty
+    or clearly invalid (month=0, day=0).
+    """
+    month = eta.get("Month") or 0
+    day = eta.get("Day") or 0
+    hour = eta.get("Hour") or 0
+    minute = eta.get("Minute") or 0
+
+    if month == 0 or day == 0:
+        return None
+
+    # Clamp to valid ranges (AIS sometimes sends 24 for hour, 60 for minute)
+    hour = min(hour, 23)
+    minute = min(minute, 59)
+
+    try:
+        ref = datetime.fromisoformat(reference_time)
+    except Exception:
+        ref = datetime.now(timezone.utc)
+
+    year = ref.year
+    try:
+        eta_dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+    # If the resulting ETA is > 6 months in the past, assume it's next year
+    if (ref - eta_dt).days > 180:
+        try:
+            eta_dt = datetime(year + 1, month, day, hour, minute, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    return eta_dt.isoformat()
+
+
+def infer_cargo_status(draught: float | None, max_draught: float | None) -> str | None:
+    """
+    Rough heuristic: if current draught > 60 % of max → laden, else ballast.
+
+    Returns None when we can't determine.
+    """
+    if draught is None or max_draught is None or max_draught <= 0:
+        return None
+    ratio = draught / max_draught
+    if ratio > 0.6:
+        return "laden"
+    elif ratio > 0:
+        return "ballast"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Non-commercial vessel filtering
+# ---------------------------------------------------------------------------
+def _is_ship_mmsi(mmsi: int | None) -> bool:
+    """Return True if the MMSI belongs to a ship (not a coast station, AtoN, etc.)."""
+    if mmsi is None:
+        return False
+    return 200_000_000 <= mmsi <= 799_999_999
+
+
+_non_commercial_mmsis: set[int] = set()
+
+
+def _is_excluded_ship_type(ship_type: int | None) -> bool:
+    """Return True if the AIS ship type should be excluded."""
+    if ship_type is None:
+        return False
+    return ship_type in config.EXCLUDED_SHIP_TYPES
 
 
 # ---------------------------------------------------------------------------
 # Row extraction
 # ---------------------------------------------------------------------------
-def _extract_position(msg: dict, meta: dict, source_file: str) -> dict | None:
+def _extract_position(msg: dict, meta: dict) -> dict | None:
     """Extract a position row from a PositionReport / StandardClassBPositionReport / etc."""
     report = (
         msg.get("PositionReport")
@@ -99,7 +179,6 @@ def _extract_position(msg: dict, meta: dict, source_file: str) -> dict | None:
         "message_id": report.get("MessageID"),
         "position_accuracy": int(report.get("PositionAccuracy", False)),
         "raim": int(report.get("Raim", False)),
-        "source_file": source_file,
     }
 
 
@@ -117,16 +196,26 @@ def _extract_vessel_static(msg: dict, meta: dict) -> dict | None:
         or meta.get("ShipName", "")
     )
 
+    dim_a = dim.get("A")
+    dim_b = dim.get("B")
+    dim_c = dim.get("C")
+    dim_d = dim.get("D")
+
+    length_m = (dim_a + dim_b) if (dim_a is not None and dim_b is not None) else None
+    beam_m = (dim_c + dim_d) if (dim_c is not None and dim_d is not None) else None
+
     return {
         "mmsi": meta.get("MMSI"),
         "ship_name": name.strip() if name else None,
         "call_sign": (static.get("CallSign") or "").strip() or None,
         "imo_number": static.get("ImoNumber") or None,
         "ship_type": static.get("Type") or static.get("ShipType"),
-        "dim_a": dim.get("A"),
-        "dim_b": dim.get("B"),
-        "dim_c": dim.get("C"),
-        "dim_d": dim.get("D"),
+        "dim_a": dim_a,
+        "dim_b": dim_b,
+        "dim_c": dim_c,
+        "dim_d": dim_d,
+        "length_m": length_m,
+        "beam_m": beam_m,
         "max_draught": static.get("MaximumStaticDraught"),
         "ais_version": static.get("AisVersion"),
         "fix_type": static.get("FixType"),
@@ -134,61 +223,54 @@ def _extract_vessel_static(msg: dict, meta: dict) -> dict | None:
     }
 
 
-def _extract_voyage(msg: dict, meta: dict, source_file: str) -> dict | None:
+def _extract_voyage(msg: dict, meta: dict, vessel_draughts: dict) -> dict | None:
     """Extract voyage info (destination & ETA) from ShipStaticData."""
     static = msg.get("ShipStaticData")
     if static is None:
         return None
     dest = (static.get("Destination") or "").strip()
-    eta = static.get("Eta", {}) or {}
-    if not dest and not any(eta.values()):
+    eta_raw = static.get("Eta", {}) or {}
+    if not dest and not any(eta_raw.values()):
         return None
+
+    reported_utc = parse_ais_time(meta.get("time_utc", ""))
+    eta_iso = build_eta_iso(eta_raw, reported_utc)
+
+    mmsi = meta.get("MMSI")
+    draught = static.get("MaximumStaticDraught")
+    max_draught = vessel_draughts.get(mmsi)
+    cargo_status = infer_cargo_status(draught, max_draught)
+
     return {
-        "mmsi": meta.get("MMSI"),
+        "mmsi": mmsi,
         "destination": dest or None,
-        "eta_month": eta.get("Month"),
-        "eta_day": eta.get("Day"),
-        "eta_hour": eta.get("Hour"),
-        "eta_minute": eta.get("Minute"),
-        "reported_utc": parse_ais_time(meta.get("time_utc", "")),
-        "source_file": source_file,
-    }
-
-
-def _extract_vessel_from_meta(meta: dict) -> dict:
-    """Minimal vessel record from MetaData (always available)."""
-    return {
-        "mmsi": meta.get("MMSI"),
-        "ship_name": (meta.get("ShipName") or "").strip() or None,
-        "seen_utc": parse_ais_time(meta.get("time_utc", "")),
+        "eta": eta_iso,
+        "draught": draught,
+        "cargo_status": cargo_status,
+        "reported_utc": reported_utc,
     }
 
 
 # ---------------------------------------------------------------------------
-# Bulk writers
+# SQL templates
 # ---------------------------------------------------------------------------
 _POSITION_INSERT = """
 INSERT INTO position_reports
-    (mmsi, timestamp_utc, latitude, longitude, sog, cog, true_heading,
-     nav_status, rot, message_id, position_accuracy, raim, source_file)
+    (mmsi, voyage_id, timestamp_utc, latitude, longitude, sog, cog,
+     true_heading, nav_status, rot, message_id, position_accuracy, raim)
 VALUES
-    (:mmsi, :timestamp_utc, :latitude, :longitude, :sog, :cog, :true_heading,
-     :nav_status, :rot, :message_id, :position_accuracy, :raim, :source_file)
-"""
-
-_RTREE_INSERT = """
-INSERT INTO position_reports_rtree (id, min_lat, max_lat, min_lon, max_lon)
-VALUES (?, ?, ?, ?, ?)
+    (:mmsi, :voyage_id, :timestamp_utc, :latitude, :longitude, :sog, :cog,
+     :true_heading, :nav_status, :rot, :message_id, :position_accuracy, :raim)
 """
 
 _VESSEL_UPSERT = """
 INSERT INTO vessels
     (mmsi, ship_name, call_sign, imo_number, ship_type,
-     dim_a, dim_b, dim_c, dim_d, max_draught,
+     dim_a, dim_b, dim_c, dim_d, length_m, beam_m, max_draught,
      ais_version, fix_type, first_seen_utc, last_seen_utc)
 VALUES
     (:mmsi, :ship_name, :call_sign, :imo_number, :ship_type,
-     :dim_a, :dim_b, :dim_c, :dim_d, :max_draught,
+     :dim_a, :dim_b, :dim_c, :dim_d, :length_m, :beam_m, :max_draught,
      :ais_version, :fix_type, :seen_utc, :seen_utc)
 ON CONFLICT(mmsi) DO UPDATE SET
     ship_name      = COALESCE(excluded.ship_name,      vessels.ship_name),
@@ -199,6 +281,8 @@ ON CONFLICT(mmsi) DO UPDATE SET
     dim_b          = COALESCE(excluded.dim_b,            vessels.dim_b),
     dim_c          = COALESCE(excluded.dim_c,            vessels.dim_c),
     dim_d          = COALESCE(excluded.dim_d,            vessels.dim_d),
+    length_m       = COALESCE(excluded.length_m,         vessels.length_m),
+    beam_m         = COALESCE(excluded.beam_m,           vessels.beam_m),
     max_draught    = COALESCE(excluded.max_draught,      vessels.max_draught),
     ais_version    = COALESCE(excluded.ais_version,      vessels.ais_version),
     fix_type       = COALESCE(excluded.fix_type,         vessels.fix_type),
@@ -219,24 +303,22 @@ ON CONFLICT(mmsi) DO UPDATE SET
 
 _VOYAGE_INSERT = """
 INSERT INTO voyages
-    (mmsi, destination, eta_month, eta_day, eta_hour, eta_minute,
-     reported_utc, source_file)
+    (mmsi, destination, eta, draught, cargo_status, reported_utc)
 VALUES
-    (:mmsi, :destination, :eta_month, :eta_day, :eta_hour, :eta_minute,
-     :reported_utc, :source_file)
-"""
-
-_FILE_RECORD = """
-INSERT OR IGNORE INTO processed_files
-    (filename, row_count, positions_added, voyages_added, vessels_upserted)
-VALUES (?, ?, ?, ?, ?)
+    (:mmsi, :destination, :eta, :draught, :cargo_status, :reported_utc)
 """
 
 
 # ---------------------------------------------------------------------------
 # File processing
 # ---------------------------------------------------------------------------
-def process_file(conn, filepath: str) -> bool:
+def _is_already_processed(filepath: str, backup_dir: str) -> bool:
+    """Check if the file has already been processed (exists in backup dir)."""
+    filename = os.path.basename(filepath)
+    return os.path.exists(os.path.join(backup_dir, filename))
+
+
+def process_file(conn, filepath: str, backup_dir: str) -> bool:
     """
     Parse a single JSONL file and load its data into the database.
 
@@ -244,21 +326,34 @@ def process_file(conn, filepath: str) -> bool:
     """
     filename = os.path.basename(filepath)
 
-    # Already done?
-    cur = conn.execute(
-        "SELECT 1 FROM processed_files WHERE filename = ?", (filename,)
-    )
-    if cur.fetchone():
+    # Already done? (check backup dir instead of DB table)
+    if _is_already_processed(filepath, backup_dir):
         log.info("  ⏩  %s already ingested, skipping.", filename)
         return True
 
     log.info("  📄  Processing %s …", filename)
 
-    positions = []
-    vessels_static = []
-    vessels_minimal = []
-    voyages = []
+    positions: list[dict] = []
+    vessels_static: list[dict] = []
+    vessels_minimal: dict[int, dict] = {}
+    voyages: list[dict] = []
+    # Track the latest voyage id per MMSI so position reports can reference it
+    _latest_voyage_id: dict[int, int] = {}
+    # Track max draughts from static data for cargo_status inference
+    _vessel_draughts: dict[int, float] = {}
     total_lines = 0
+    skipped_non_commercial = 0
+
+    # Pre-load known max draughts from DB for cargo-status inference
+    for row in conn.execute("SELECT mmsi, max_draught FROM vessels WHERE max_draught IS NOT NULL"):
+        _vessel_draughts[row[0]] = row[1]
+
+    # Pre-load latest voyage per MMSI from DB
+    for row in conn.execute(
+        """SELECT mmsi, id FROM voyages
+           WHERE id IN (SELECT MAX(id) FROM voyages GROUP BY mmsi)"""
+    ):
+        _latest_voyage_id[row[0]] = row[1]
 
     with open(filepath, "r", encoding="utf-8") as fh:
         for line in fh:
@@ -274,46 +369,84 @@ def process_file(conn, filepath: str) -> bool:
             msg = record.get("Message", {})
             meta = record.get("MetaData", {})
             msg_type = record.get("MessageType", "")
+            mmsi = meta.get("MMSI")
+
+            # --- Skip non-ship MMSIs (coast stations, AtoN, etc.) -----------
+            if not _is_ship_mmsi(mmsi):
+                continue
+
+            # --- Skip known non-commercial vessels ---------------------------
+            if mmsi in _non_commercial_mmsis:
+                skipped_non_commercial += 1
+                continue
+
+            # --- Static data ------------------------------------------------
+            if msg_type in ("ShipStaticData", "StaticDataReport"):
+                vs = _extract_vessel_static(msg, meta)
+                if vs and vs["mmsi"]:
+                    if _is_excluded_ship_type(vs["ship_type"]):
+                        _non_commercial_mmsis.add(vs["mmsi"])
+                        skipped_non_commercial += 1
+                        continue
+
+                    vessels_static.append(vs)
+
+                    # Track draught for cargo-status inference
+                    if vs["max_draught"]:
+                        _vessel_draughts[vs["mmsi"]] = vs["max_draught"]
+
+                voy = _extract_voyage(msg, meta, _vessel_draughts)
+                if voy and voy["mmsi"]:
+                    voyages.append(voy)
 
             # --- Position ---------------------------------------------------
-            if msg_type in (
+            elif msg_type in (
                 "PositionReport",
                 "StandardClassBPositionReport",
                 "ExtendedClassBPositionReport",
                 "StandardSearchAndRescueAircraftReport",
             ):
-                pos = _extract_position(msg, meta, filename)
+                pos = _extract_position(msg, meta)
                 if pos and pos["mmsi"]:
+                    # Attach the latest known voyage for this MMSI
+                    pos["voyage_id"] = _latest_voyage_id.get(mmsi)
                     positions.append(pos)
-                    # We also create a minimal vessel record
-                    vessels_minimal.append(_extract_vessel_from_meta(meta))
-
-            # --- Static data ------------------------------------------------
-            elif msg_type in ("ShipStaticData", "StaticDataReport"):
-                vs = _extract_vessel_static(msg, meta)
-                if vs and vs["mmsi"]:
-                    vessels_static.append(vs)
-                voy = _extract_voyage(msg, meta, filename)
-                if voy and voy["mmsi"]:
-                    voyages.append(voy)
+                    vessels_minimal[mmsi] = {
+                        "mmsi": mmsi,
+                        "ship_name": (meta.get("ShipName") or "").strip() or None,
+                        "seen_utc": parse_ais_time(meta.get("time_utc", "")),
+                    }
 
             # --- Other message types (BaseStationReport, etc.) --------------
             else:
-                # At minimum track the vessel from metadata if MMSI present
-                if meta.get("MMSI"):
-                    vessels_minimal.append(_extract_vessel_from_meta(meta))
+                if mmsi:
+                    vessels_minimal[mmsi] = {
+                        "mmsi": mmsi,
+                        "ship_name": (meta.get("ShipName") or "").strip() or None,
+                        "seen_utc": parse_ais_time(meta.get("time_utc", "")),
+                    }
 
     # ---- Write to DB in one transaction ------------------------------------
     try:
         cur = conn.cursor()
 
-        # 1) Upsert vessels (static first — richer data; then minimal)
-        for v in vessels_static:
-            cur.execute(_VESSEL_UPSERT, v)
-        for v in vessels_minimal:
-            cur.execute(_VESSEL_UPSERT_MINIMAL, v)
+        # 1) Upsert vessels — static first (richer data), then minimal (deduped)
+        if vessels_static:
+            cur.executemany(_VESSEL_UPSERT, vessels_static)
+        if vessels_minimal:
+            cur.executemany(_VESSEL_UPSERT_MINIMAL, list(vessels_minimal.values()))
 
-        # 2) Get the current max id so we know which rows are new
+        # 2) Insert voyages and capture their IDs for position back-linking
+        for voy in voyages:
+            cur.execute(_VOYAGE_INSERT, voy)
+            voyage_id = cur.lastrowid
+            _latest_voyage_id[voy["mmsi"]] = voyage_id
+
+        # Update voyage_id on positions that were collected *after* a voyage in this file
+        # (positions extracted before the voyage in the file already have voyage_id=None
+        #  or a previous voyage; this is acceptable — AIS ordering is best-effort)
+
+        # 3) Get the current max id so we know which rows are new
         max_id_before = cur.execute(
             "SELECT COALESCE(MAX(id), 0) FROM position_reports"
         ).fetchone()[0]
@@ -323,7 +456,7 @@ def process_file(conn, filepath: str) -> bool:
             batch = positions[i : i + config.BATCH_SIZE]
             cur.executemany(_POSITION_INSERT, batch)
 
-        # Populate the R*Tree from all newly inserted rows
+        # Populate the R*Tree for all newly inserted rows in one go
         cur.execute(
             """INSERT INTO position_reports_rtree (id, min_lat, max_lat, min_lon, max_lon)
                SELECT id, latitude, latitude, longitude, longitude
@@ -332,15 +465,6 @@ def process_file(conn, filepath: str) -> bool:
             (max_id_before,),
         )
 
-        # 3) Insert voyages
-        if voyages:
-            cur.executemany(_VOYAGE_INSERT, voyages)
-
-        # 4) Record the file as processed
-        cur.execute(
-            _FILE_RECORD,
-            (filename, total_lines, len(positions), len(voyages), len(vessels_static)),
-        )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -348,12 +472,15 @@ def process_file(conn, filepath: str) -> bool:
         return False
 
     log.info(
-        "  ✅  %s → %d positions, %d voyages, %d vessel updates (%d lines)",
+        "  ✅  %s → %d positions, %d voyages, %d static, %d minimal vessels "
+        "(%d lines, %d skipped non-commercial)",
         filename,
         len(positions),
         len(voyages),
         len(vessels_static),
+        len(vessels_minimal),
         total_lines,
+        skipped_non_commercial,
     )
     return True
 
@@ -381,7 +508,7 @@ def run_once(conn, raw_dir: str, backup_dir: str):
     log.info("Found %d JSONL file(s) to process.", len(files))
 
     for fp in files:
-        ok = process_file(conn, fp)
+        ok = process_file(conn, fp, backup_dir)
         if ok:
             move_to_backup(fp, backup_dir)
 

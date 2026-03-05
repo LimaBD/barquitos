@@ -1,9 +1,8 @@
-# Data Processor
+# Database
 
-Reads the raw AIS JSONL files produced by `ais_collector`, parses them into
-a normalised SQLite database, and moves processed files to a backup folder.
+Shared SQLite database layer for all barquitos components.
 
-## Database Schema
+## Schema
 
 | Table | Purpose |
 |---|---|
@@ -16,39 +15,33 @@ a normalised SQLite database, and moves processed files to a backup folder.
 The schema avoids data duplication — vessel identity is stored once and
 referenced by foreign key from positions and voyages.
 
-## Quick Start
+## Usage
 
-```bash
-# One-shot: process all pending files then exit
-python data_processor/ingest_ais.py
+```python
+from db import init_db, get_connection
 
-# Watch mode: keep checking for new files every 30 seconds
-python data_processor/ingest_ais.py --watch
+# First time: create schema and get connection
+conn = init_db("/path/to/barquitos.db")
 
-# Custom interval
-python data_processor/ingest_ais.py --watch --interval 60
+# Subsequent: just get a tuned connection
+conn = get_connection("/path/to/barquitos.db")
 ```
 
-## Configuration
+## Verification
 
-Edit `data_processor/config.py`.  By default it reads
-`ais_collector/config.py → DATA_OUTPUT_DIR` to know where the raw JSONL
-files are, and creates a backup sibling folder (`ais_processed/`).
+```bash
+python db/verify.py                          # uses default DB path
+python db/verify.py /path/to/barquitos.db    # explicit path
+```
 
-| Setting | Default | Description |
-|---|---|---|
-| `AIS_RAW_DIR` | from ais\_collector config | Where JSONL files are written |
-| `AIS_BACKUP_DIR` | `<parent of raw dir>/ais_processed` | Where processed files are moved |
-| `DATABASE_PATH` | `data_processor/barquitos.db` | SQLite database location |
-| `BATCH_SIZE` | 5000 | Rows per INSERT batch |
-
-## Performance Notes (Raspberry Pi 3B)
+## Performance Tuning (Raspberry Pi 3B)
 
 - **SQLite** with WAL journal mode — zero server overhead, low RAM.
 - R\*Tree for spatial queries — built into SQLite, no extensions needed.
 - Indexed on `(mmsi, timestamp_utc)` for fast vessel-timeline queries.
 - `PRAGMA synchronous = NORMAL` + WAL gives good write throughput.
-  Raw JSONL backups act as a safety net if the DB ever corrupts.
+- `PRAGMA mmap_size = 256 MB` — memory-mapped I/O for faster reads.
+- Raw JSONL backups act as a safety net if the DB ever corrupts.
 
 ## Example Queries
 
@@ -74,9 +67,3 @@ FROM vessels
 WHERE ship_name IS NOT NULL
 ORDER BY last_seen_utc DESC;
 ```
-
-## Future Enrichment
-
-This folder is designed to host additional scripts that enrich the database
-with data from other sources (commodity prices, port schedules, weather, etc.).
-Simply add new tables / columns and new Python scripts alongside `ingest_ais.py`.

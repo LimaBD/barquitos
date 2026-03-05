@@ -1,3 +1,0 @@
-# filepath: /home/msi/Desktop/barquitos/data_processor/requirements.txt
-# No external dependencies — uses only the Python standard library (sqlite3, json, etc.)
-# If you later add enrichment scripts that need extra packages, list them here.

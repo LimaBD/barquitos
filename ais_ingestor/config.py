@@ -1,8 +1,7 @@
 """
-Configuration for the data processing pipeline.
+Configuration for the AIS ingestor.
 
-All paths and settings used by the ingestion scripts and future enrichment
-modules live here.
+All paths and settings used by the AIS ingestion script live here.
 """
 
 import importlib.util
@@ -46,3 +45,21 @@ BATCH_SIZE = 5000
 
 # JSONL filename glob pattern
 JSONL_GLOB = "ais_*.jsonl"
+
+# =============================================================================
+# Vessel filtering — skip non-commercial vessels
+# =============================================================================
+# AIS ship-type codes to EXCLUDE.  These are pleasure / recreational /
+# non-commercial categories that add noise for trade-nowcasting purposes.
+#
+# Reference: ITU-R M.1371-5, Table 53
+#   30 = Fishing
+#   36 = Sailing vessel
+#   37 = Pleasure craft / yacht
+#
+# We keep fishing (30) because it has commercial value.
+# Add or remove codes here as needed.
+EXCLUDED_SHIP_TYPES: set[int] = {
+    36,  # Sailing vessel
+    37,  # Pleasure craft / yacht
+}
