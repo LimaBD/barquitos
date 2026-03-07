@@ -11,6 +11,17 @@ Tables are designed for global trade intelligence & vessel tracking:
   - `navigational_status_history`   : Nav status changes (infrequent, ~3/month).
   - `position_history`              : Time-series of position observations (FK → vessels).
 
+Views:
+  - `v_total_vessels`       : Total number of distinct vessels.
+  - `v_vessels_by_type`     : Vessel count grouped by ship type (with label & category).
+  - `v_total_positions`     : Total number of position reports.
+  - `v_latest_positions`    : Most recent known position of every vessel.
+  - `v_vessel_track`        : All positions for a vessel (filter by mmsi or imo_number).
+
+Parametric queries (constants):
+  - `VESSEL_POSITIONS_AT_SQL` : Position of all (or filtered) vessels at a given
+                                timestamp (±5 s window).
+
 An R*Tree virtual table (`position_history_rtree`) gives fast spatial look-ups
 without needing the SpatiaLite extension (works on stock SQLite / RPi).
 """
@@ -138,6 +149,87 @@ CREATE VIRTUAL TABLE IF NOT EXISTS position_history_rtree USING rtree(
     min_lat, max_lat,
     min_lon, max_lon
 );
+
+-- =========================================================================
+-- VIEW: Total number of distinct vessels
+-- =========================================================================
+CREATE VIEW IF NOT EXISTS v_total_vessels AS
+SELECT COUNT(*) AS total_vessels
+FROM vessels;
+
+-- =========================================================================
+-- VIEW: Total vessels by ship type (with label and category)
+-- =========================================================================
+CREATE VIEW IF NOT EXISTS v_vessels_by_type AS
+SELECT
+    COALESCE(st.label, 'Unknown') AS ship_type_label,
+    COALESCE(st.category, 'Unknown') AS category,
+    v.ship_type AS ship_type_code,
+    COUNT(*) AS vessel_count
+FROM vessels v
+LEFT JOIN ship_types st ON v.ship_type = st.ship_type
+GROUP BY v.ship_type
+ORDER BY vessel_count DESC;
+
+-- =========================================================================
+-- VIEW: Total number of position reports
+-- =========================================================================
+CREATE VIEW IF NOT EXISTS v_total_positions AS
+SELECT COUNT(*) AS total_positions
+FROM position_history;
+
+-- =========================================================================
+-- VIEW: Latest known position of every vessel (closest record to "now")
+--        Useful as a base; for a specific timestamp use the parametric
+--        query helper  fn_vessel_positions_at(timestamp, ship_type).
+-- =========================================================================
+CREATE VIEW IF NOT EXISTS v_latest_positions AS
+SELECT
+    ph.mmsi,
+    v.ship_name,
+    v.ship_type,
+    COALESCE(st.label, 'Unknown') AS ship_type_label,
+    COALESCE(st.category, 'Unknown') AS category,
+    ph.timestamp_utc,
+    ph.latitude,
+    ph.longitude,
+    ph.speed_over_ground,
+    ph.course_over_ground,
+    ph.true_heading
+FROM position_history ph
+INNER JOIN (
+    SELECT mmsi, MAX(timestamp_utc) AS max_ts
+    FROM position_history
+    GROUP BY mmsi
+) latest ON ph.mmsi = latest.mmsi AND ph.timestamp_utc = latest.max_ts
+LEFT JOIN vessels v ON ph.mmsi = v.mmsi
+LEFT JOIN ship_types st ON v.ship_type = st.ship_type;
+
+-- =========================================================================
+-- VIEW: All positions for a specific vessel (filter by mmsi or imo_number)
+--        Usage:
+--          SELECT * FROM v_vessel_track WHERE mmsi = 123456789;
+--          SELECT * FROM v_vessel_track WHERE imo_number = 9876543;
+-- =========================================================================
+CREATE VIEW IF NOT EXISTS v_vessel_track AS
+SELECT
+    v.mmsi,
+    v.imo_number,
+    v.ship_name,
+    v.ship_type,
+    COALESCE(st.label, 'Unknown') AS ship_type_label,
+    COALESCE(st.category, 'Unknown') AS category,
+    ph.timestamp_utc,
+    ph.latitude,
+    ph.longitude,
+    ph.speed_over_ground,
+    ph.course_over_ground,
+    ph.true_heading,
+    ph.rate_of_turn
+FROM position_history ph
+JOIN vessels v ON ph.mmsi = v.mmsi
+LEFT JOIN ship_types st ON v.ship_type = st.ship_type
+ORDER BY ph.mmsi, ph.timestamp_utc;
 """
 
 # =========================================================================
@@ -237,4 +329,58 @@ INSERT OR IGNORE INTO nav_statuses (navigational_status, label) VALUES (?, ?);
 
 SEED_SHIP_TYPES_SQL = """
 INSERT OR IGNORE INTO ship_types (ship_type, label, category) VALUES (?, ?, ?);
+"""
+
+# =========================================================================
+# Parametric query: vessel positions at a specific point in time
+# =========================================================================
+# For each vessel, finds the position record closest to the given timestamp
+# within a ±5-second window.  Returns nothing for vessels that have no
+# record within that window.
+#
+# Parameters:
+#   :target_ts  — ISO-8601 UTC timestamp, e.g. '2026-03-04T04:35:00Z'
+#   :ship_type  — (optional) ship-type code to filter by; pass NULL to
+#                  include all vessel types.
+#
+# Usage:
+#   conn.execute(VESSEL_POSITIONS_AT_SQL, {"target_ts": "...", "ship_type": None})
+#   conn.execute(VESSEL_POSITIONS_AT_SQL, {"target_ts": "...", "ship_type": 80})
+# =========================================================================
+VESSEL_POSITIONS_AT_SQL = """
+WITH candidates AS (
+    SELECT
+        ph.mmsi,
+        ph.timestamp_utc,
+        ph.latitude,
+        ph.longitude,
+        ph.speed_over_ground,
+        ph.course_over_ground,
+        ph.true_heading,
+        ABS(strftime('%s', ph.timestamp_utc) - strftime('%s', :target_ts)) AS diff_seconds,
+        ROW_NUMBER() OVER (
+            PARTITION BY ph.mmsi
+            ORDER BY ABS(strftime('%s', ph.timestamp_utc) - strftime('%s', :target_ts))
+        ) AS rn
+    FROM position_history ph
+    WHERE ABS(strftime('%s', ph.timestamp_utc) - strftime('%s', :target_ts)) <= 5
+)
+SELECT
+    c.mmsi,
+    v.ship_name,
+    v.ship_type,
+    COALESCE(st.label, 'Unknown') AS ship_type_label,
+    c.timestamp_utc,
+    c.latitude,
+    c.longitude,
+    c.speed_over_ground,
+    c.course_over_ground,
+    c.true_heading,
+    c.diff_seconds
+FROM candidates c
+JOIN vessels v ON c.mmsi = v.mmsi
+LEFT JOIN ship_types st ON v.ship_type = st.ship_type
+WHERE c.rn = 1
+  AND (:ship_type IS NULL OR v.ship_type = :ship_type)
+ORDER BY c.mmsi;
 """

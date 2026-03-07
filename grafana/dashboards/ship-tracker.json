@@ -1,11 +1,11 @@
 {
   "uid": "barquitos-ship-tracker",
-  "title": "🚢 Ship Tracker — World Map",
-  "description": "Real-time AIS vessel positions on a world map. Stationary ships = dots, moving ships = directional arrows.",
-  "tags": ["ais", "ships", "map"],
+  "title": "🚢 Ship Tracker — Debug Dashboard",
+  "description": "AIS vessel tracking debug dashboard. KPI stats, positions on map, vessel breakdown by type, and a searchable table — all powered by database views.",
+  "tags": ["ais", "ships", "map", "debug"],
   "timezone": "utc",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "1m",
   "time": {
     "from": "now-1h",
@@ -17,12 +17,12 @@
         "name": "ship_category",
         "type": "query",
         "label": "Ship Category",
-        "description": "Filter by ship type category (Cargo, Tanker, Passenger, etc.)",
+        "description": "Filter by ship type category",
         "datasource": {
           "type": "frser-sqlite-datasource",
           "uid": "barquitos_sqlite"
         },
-        "query": "SELECT DISTINCT category FROM ship_types WHERE category IS NOT NULL ORDER BY category",
+        "query": "SELECT DISTINCT category FROM v_vessels_by_type ORDER BY category",
         "multi": true,
         "includeAll": true,
         "allValue": "",
@@ -43,7 +43,7 @@
           "type": "frser-sqlite-datasource",
           "uid": "barquitos_sqlite"
         },
-        "query": "SELECT DISTINCT label FROM ship_types WHERE ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) ORDER BY label",
+        "query": "SELECT DISTINCT ship_type_label FROM v_vessels_by_type WHERE ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) ORDER BY ship_type_label",
         "multi": true,
         "includeAll": true,
         "allValue": "",
@@ -58,7 +58,7 @@
       {
         "name": "speed_threshold",
         "type": "custom",
-        "label": "Moving threshold (knots)",
+        "label": "Moving threshold (kn)",
         "description": "Speed above which a ship is considered moving",
         "query": "0.5, 1.0, 2.0, 3.0, 5.0",
         "current": {
@@ -68,16 +68,175 @@
         },
         "multi": false,
         "includeAll": false
+      },
+      {
+        "name": "vessel_search",
+        "type": "textbox",
+        "label": "Vessel search (MMSI / IMO / name)",
+        "description": "Enter an MMSI, IMO number, or part of a vessel name to look up its full track",
+        "current": {
+          "selected": false,
+          "text": "",
+          "value": ""
+        }
       }
     ]
   },
   "panels": [
     {
+      "id": 10,
+      "title": "📈 KPI Overview",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
       "id": 1,
+      "title": "Total Vessels",
+      "description": "Total distinct vessels in the database (v_total_vessels)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryText": "SELECT total_vessels FROM v_total_vessels",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "semi-dark-blue" },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "total_vessels" },
+            "properties": [
+              { "id": "displayName", "value": "🚢 Total Vessels" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "title": "Total Position Reports",
+      "description": "Total position reports stored (v_total_positions)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryText": "SELECT total_positions FROM v_total_positions",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "semi-dark-green" },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "total_positions" },
+            "properties": [
+              { "id": "displayName", "value": "📍 Position Reports" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "title": "Moving vs Stationary",
+      "description": "From v_latest_positions, split by speed threshold",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 1 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryText": "SELECT SUM(CASE WHEN COALESCE(speed_over_ground, 0) >= ${speed_threshold} THEN 1 ELSE 0 END) AS moving, SUM(CASE WHEN COALESCE(speed_over_ground, 0) < ${speed_threshold} THEN 1 ELSE 0 END) AS stationary, COUNT(*) AS total FROM v_latest_positions",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "moving" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-red" } },
+              { "id": "displayName", "value": "🚢 Moving" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "stationary" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-blue" } },
+              { "id": "displayName", "value": "⚓ Stationary" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "total" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-green" } },
+              { "id": "displayName", "value": "📊 Total w/ position" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 20,
+      "title": "📍 Ship Positions — World Map",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 4,
       "title": "Ship Positions — World Map",
-      "description": "🔵 Dots = stationary ships  |  🔴 Arrows = moving ships (arrow points in direction of travel).  Use the drop-downs above to filter by Ship Category and Ship Type.",
+      "description": "🔵 Dots = stationary  |  🔴 Arrows = moving (arrow = direction of travel).  Data from v_latest_positions view.",
       "type": "geomap",
-      "gridPos": { "h": 24, "w": 24, "x": 0, "y": 0 },
+      "gridPos": { "h": 22, "w": 24, "x": 0, "y": 6 },
       "datasource": {
         "type": "frser-sqlite-datasource",
         "uid": "barquitos_sqlite"
@@ -85,13 +244,13 @@
       "targets": [
         {
           "refId": "stationary",
-          "queryText": "SELECT p.latitude  AS latitude, p.longitude AS longitude, v.ship_name   AS ship_name, COALESCE(st.label, 'Unknown')    AS ship_type, COALESCE(st.category, 'Unknown') AS category, COALESCE(p.speed_over_ground, 0) AS speed, COALESCE(p.course_over_ground, 0) AS course, v.mmsi AS mmsi, p.timestamp_utc AS time FROM position_history p JOIN vessels v ON v.mmsi = p.mmsi LEFT JOIN ship_types st ON st.ship_type = v.ship_type WHERE COALESCE(p.speed_over_ground, 0) < ${speed_threshold} AND ('${ship_category:raw}' = '' OR COALESCE(st.category, 'Unknown') IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR COALESCE(st.label, 'Unknown') IN (${ship_type_label:sqlstring})) AND p.id IN (SELECT MAX(p2.id) FROM position_history p2 GROUP BY p2.mmsi) ORDER BY p.timestamp_utc DESC LIMIT 10000",
+          "queryText": "SELECT latitude, longitude, ship_name, ship_type_label AS ship_type, category, COALESCE(speed_over_ground, 0) AS speed, COALESCE(course_over_ground, 0) AS course, mmsi, timestamp_utc AS time FROM v_latest_positions WHERE COALESCE(speed_over_ground, 0) < ${speed_threshold} AND ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 10000",
           "queryType": "table",
           "hide": false
         },
         {
           "refId": "moving",
-          "queryText": "SELECT p.latitude  AS latitude, p.longitude AS longitude, v.ship_name   AS ship_name, COALESCE(st.label, 'Unknown')    AS ship_type, COALESCE(st.category, 'Unknown') AS category, COALESCE(p.speed_over_ground, 0) AS speed, COALESCE(p.course_over_ground, 0) AS course, v.mmsi AS mmsi, p.timestamp_utc AS time FROM position_history p JOIN vessels v ON v.mmsi = p.mmsi LEFT JOIN ship_types st ON st.ship_type = v.ship_type WHERE COALESCE(p.speed_over_ground, 0) >= ${speed_threshold} AND ('${ship_category:raw}' = '' OR COALESCE(st.category, 'Unknown') IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR COALESCE(st.label, 'Unknown') IN (${ship_type_label:sqlstring})) AND p.id IN (SELECT MAX(p2.id) FROM position_history p2 GROUP BY p2.mmsi) ORDER BY p.timestamp_utc DESC LIMIT 10000",
+          "queryText": "SELECT latitude, longitude, ship_name, ship_type_label AS ship_type, category, COALESCE(speed_over_ground, 0) AS speed, COALESCE(course_over_ground, 0) AS course, mmsi, timestamp_utc AS time FROM v_latest_positions WHERE COALESCE(speed_over_ground, 0) >= ${speed_threshold} AND ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 10000",
           "queryType": "table",
           "hide": false
         }
@@ -110,9 +269,7 @@
         },
         "basemap": {
           "type": "carto",
-          "config": {
-            "theme": "dark"
-          },
+          "config": { "theme": "dark" },
           "name": "CartoDB Dark Matter"
         },
         "controls": {
@@ -123,18 +280,14 @@
           "showDebug": false,
           "showMeasure": false
         },
-        "tooltip": {
-          "mode": "details"
-        },
+        "tooltip": { "mode": "details" },
         "layers": [
           {
             "name": "Stationary ships",
             "type": "markers",
             "config": {
               "style": {
-                "size": {
-                  "fixed": 5
-                },
+                "size": { "fixed": 5 },
                 "color": {
                   "field": "category",
                   "fixed": "semi-dark-blue"
@@ -153,9 +306,7 @@
               "longitude": "longitude"
             },
             "tooltip": true,
-            "query": {
-              "refId": "stationary"
-            }
+            "query": { "refId": "stationary" }
           },
           {
             "name": "Moving ships",
@@ -191,18 +342,25 @@
               "longitude": "longitude"
             },
             "tooltip": true,
-            "query": {
-              "refId": "moving"
-            }
+            "query": { "refId": "moving" }
           }
         ]
       }
     },
     {
-      "id": 2,
+      "id": 30,
+      "title": "📊 Fleet Breakdown",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 5,
       "title": "Vessels by Category",
+      "description": "Donut chart from v_vessels_by_type — aggregated by category",
       "type": "piechart",
-      "gridPos": { "h": 10, "w": 8, "x": 0, "y": 24 },
+      "gridPos": { "h": 10, "w": 8, "x": 0, "y": 29 },
       "datasource": {
         "type": "frser-sqlite-datasource",
         "uid": "barquitos_sqlite"
@@ -210,14 +368,12 @@
       "targets": [
         {
           "refId": "A",
-          "queryText": "SELECT COALESCE(st.category, 'Unknown') AS category, COUNT(DISTINCT v.mmsi) AS count FROM vessels v LEFT JOIN ship_types st ON st.ship_type = v.ship_type GROUP BY category ORDER BY count DESC",
+          "queryText": "SELECT category, SUM(vessel_count) AS count FROM v_vessels_by_type GROUP BY category ORDER BY count DESC",
           "queryType": "table"
         }
       ],
       "options": {
-        "reduceOptions": {
-          "calcs": ["lastNotNull"]
-        },
+        "reduceOptions": { "calcs": ["lastNotNull"] },
         "pieType": "donut",
         "legend": {
           "displayMode": "table",
@@ -225,8 +381,79 @@
           "showLegend": true,
           "values": ["value", "percent"]
         },
-        "tooltip": {
-          "mode": "single"
+        "tooltip": { "mode": "single" }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Vessels by Ship Type (top 20)",
+      "description": "Bar chart from v_vessels_by_type — top 20 types by vessel count",
+      "type": "barchart",
+      "gridPos": { "h": 10, "w": 16, "x": 8, "y": 29 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryText": "SELECT ship_type_label AS ship_type, vessel_count FROM v_vessels_by_type ORDER BY vessel_count DESC LIMIT 20",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "always",
+        "barWidth": 0.7,
+        "groupWidth": 0.8,
+        "legend": { "displayMode": "hidden", "showLegend": false },
+        "tooltip": { "mode": "single" },
+        "xTickLabelRotation": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "vessel_count" },
+            "properties": [
+              { "id": "displayName", "value": "Vessels" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "title": "Fleet Breakdown — Full Table",
+      "description": "Complete breakdown from v_vessels_by_type",
+      "type": "table",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 39 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryText": "SELECT ship_type_label AS ship_type, category, ship_type_code AS ais_code, vessel_count FROM v_vessels_by_type ORDER BY vessel_count DESC",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "vessel_count", "desc": true }],
+        "cellHeight": "sm",
+        "footer": {
+          "show": true,
+          "reducer": ["sum"],
+          "fields": ["vessel_count"]
         }
       },
       "fieldConfig": {
@@ -235,64 +462,19 @@
       }
     },
     {
-      "id": 3,
-      "title": "Moving vs Stationary",
-      "type": "stat",
-      "gridPos": { "h": 10, "w": 8, "x": 8, "y": 24 },
-      "datasource": {
-        "type": "frser-sqlite-datasource",
-        "uid": "barquitos_sqlite"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "queryText": "SELECT SUM(CASE WHEN COALESCE(p.speed_over_ground, 0) >= ${speed_threshold} THEN 1 ELSE 0 END) AS moving, SUM(CASE WHEN COALESCE(p.speed_over_ground, 0) < ${speed_threshold} THEN 1 ELSE 0 END) AS stationary, COUNT(*) AS total FROM position_history p WHERE p.id IN (SELECT MAX(p2.id) FROM position_history p2 GROUP BY p2.mmsi)",
-          "queryType": "table"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": ["lastNotNull"]
-        },
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "auto",
-        "justifyMode": "center"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "moving" },
-            "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-red" } },
-              { "id": "displayName", "value": "🚢 Moving" }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "stationary" },
-            "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-blue" } },
-              { "id": "displayName", "value": "⚓ Stationary" }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "total" },
-            "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-green" } },
-              { "id": "displayName", "value": "📊 Total" }
-            ]
-          }
-        ]
-      }
+      "id": 40,
+      "title": "📋 Latest Position Reports",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 },
+      "collapsed": false,
+      "panels": []
     },
     {
-      "id": 4,
+      "id": 8,
       "title": "Latest Position Reports",
+      "description": "Last known position of each vessel from v_latest_positions, filtered by category/type dropdowns",
       "type": "table",
-      "gridPos": { "h": 10, "w": 8, "x": 16, "y": 24 },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 50 },
       "datasource": {
         "type": "frser-sqlite-datasource",
         "uid": "barquitos_sqlite"
@@ -300,7 +482,7 @@
       "targets": [
         {
           "refId": "A",
-          "queryText": "SELECT v.ship_name, v.mmsi, COALESCE(st.label, 'Unknown') AS ship_type, COALESCE(st.category, 'Unknown') AS category, ROUND(p.latitude, 4) AS lat, ROUND(p.longitude, 4) AS lon, p.speed_over_ground AS speed_kn, ROUND(p.course_over_ground, 1) AS course, p.timestamp_utc AS last_report FROM position_history p JOIN vessels v ON v.mmsi = p.mmsi LEFT JOIN ship_types st ON st.ship_type = v.ship_type WHERE ('${ship_category:raw}' = '' OR COALESCE(st.category, 'Unknown') IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR COALESCE(st.label, 'Unknown') IN (${ship_type_label:sqlstring})) AND p.id IN (SELECT MAX(p2.id) FROM position_history p2 GROUP BY p2.mmsi) ORDER BY p.timestamp_utc DESC LIMIT 100",
+          "queryText": "SELECT ship_name, mmsi, ship_type_label AS ship_type, category, ROUND(latitude, 4) AS lat, ROUND(longitude, 4) AS lon, speed_over_ground AS speed_kn, ROUND(course_over_ground, 1) AS course, true_heading AS heading, timestamp_utc AS last_report FROM v_latest_positions WHERE ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 200",
           "queryType": "table"
         }
       ],
@@ -312,6 +494,194 @@
       "fieldConfig": {
         "defaults": {},
         "overrides": []
+      }
+    },
+    {
+      "id": 50,
+      "title": "🔍 Vessel Track Search",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 62 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 9,
+      "title": "Vessel Track — All Positions",
+      "description": "All historical positions for a specific vessel. Enter MMSI, IMO, or vessel name in the 'Vessel search' textbox above. Data from v_vessel_track.",
+      "type": "table",
+      "gridPos": { "h": 12, "w": 14, "x": 0, "y": 63 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryText": "SELECT mmsi, imo_number, ship_name, ship_type_label AS ship_type, category, timestamp_utc, ROUND(latitude, 5) AS lat, ROUND(longitude, 5) AS lon, speed_over_ground AS speed_kn, ROUND(course_over_ground, 1) AS course, true_heading AS heading, rate_of_turn AS rot FROM v_vessel_track WHERE ('${vessel_search:raw}' != '' AND (CAST(mmsi AS TEXT) = '${vessel_search:raw}' OR CAST(imo_number AS TEXT) = '${vessel_search:raw}' OR ship_name LIKE '%${vessel_search:raw}%')) ORDER BY timestamp_utc DESC LIMIT 500",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "timestamp_utc", "desc": true }],
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "title": "Vessel Track — Map",
+      "description": "Map view of the selected vessel's track. Enter a value in the 'Vessel search' textbox.",
+      "type": "geomap",
+      "gridPos": { "h": 12, "w": 10, "x": 14, "y": 63 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "track",
+          "queryText": "SELECT latitude, longitude, ship_name, speed_over_ground AS speed, course_over_ground AS course, timestamp_utc AS time FROM v_vessel_track WHERE ('${vessel_search:raw}' != '' AND (CAST(mmsi AS TEXT) = '${vessel_search:raw}' OR CAST(imo_number AS TEXT) = '${vessel_search:raw}' OR ship_name LIKE '%${vessel_search:raw}%')) ORDER BY timestamp_utc LIMIT 5000",
+          "queryType": "table",
+          "hide": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "view": {
+          "id": "fit",
+          "allLayers": true
+        },
+        "basemap": {
+          "type": "carto",
+          "config": { "theme": "dark" },
+          "name": "CartoDB Dark Matter"
+        },
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": true,
+          "showAttribution": true,
+          "showScale": true,
+          "showDebug": false,
+          "showMeasure": false
+        },
+        "tooltip": { "mode": "details" },
+        "layers": [
+          {
+            "name": "Track points",
+            "type": "markers",
+            "config": {
+              "style": {
+                "size": {
+                  "field": "speed",
+                  "fixed": 6,
+                  "min": 4,
+                  "max": 12
+                },
+                "color": {
+                  "fixed": "semi-dark-orange"
+                },
+                "opacity": 0.85,
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "img/icons/marker/circle.svg"
+                }
+              },
+              "showLegend": false
+            },
+            "location": {
+              "mode": "coords",
+              "latitude": "latitude",
+              "longitude": "longitude"
+            },
+            "tooltip": true,
+            "query": { "refId": "track" }
+          }
+        ]
+      }
+    },
+    {
+      "id": 60,
+      "title": "🗄️ Database Health",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 75 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 12,
+      "title": "Database Table Row Counts",
+      "description": "Row counts for every table — useful for debugging ingestion pipelines",
+      "type": "table",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 76 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryText": "SELECT 'vessels' AS table_name, COUNT(*) AS row_count FROM vessels UNION ALL SELECT 'position_history', COUNT(*) FROM position_history UNION ALL SELECT 'destination_history', COUNT(*) FROM destination_history UNION ALL SELECT 'draught_history', COUNT(*) FROM draught_history UNION ALL SELECT 'navigational_status_history', COUNT(*) FROM navigational_status_history UNION ALL SELECT 'ship_name_history', COUNT(*) FROM ship_name_history UNION ALL SELECT 'ship_types', COUNT(*) FROM ship_types UNION ALL SELECT 'nav_statuses', COUNT(*) FROM nav_statuses ORDER BY row_count DESC",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "row_count", "desc": true }],
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "title": "Position Ingestion Timeline",
+      "description": "Number of position reports ingested per minute — verifies continuous ingestion",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 76 },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "barquitos_sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "queryText": "SELECT strftime('%Y-%m-%dT%H:%M:00Z', timestamp_utc) AS time, COUNT(*) AS positions_per_minute FROM position_history WHERE timestamp_utc >= datetime('now', '-24 hours') GROUP BY strftime('%Y-%m-%dT%H:%M', timestamp_utc) ORDER BY time",
+          "queryType": "table"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "hidden", "showLegend": false },
+        "tooltip": { "mode": "single" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "semi-dark-green" },
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "drawStyle": "bars",
+            "barAlignment": 0,
+            "showPoints": "never"
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "positions_per_minute" },
+            "properties": [
+              { "id": "displayName", "value": "Positions / min" }
+            ]
+          }
+        ]
       }
     }
   ]
