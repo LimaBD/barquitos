@@ -892,11 +892,16 @@ pub fn move_to_backup(filepath: &Path, backup_dir: &Path) {
 // Public entry point — PARALLEL pipeline
 // =========================================================================
 
-/// Parallel ingestion pipeline:
+/// Parallel ingestion pipeline — STREAMING BATCHES:
 ///   1. Discover JSONL files
-///   2. Parse ALL files in parallel (rayon)
-///   3. Write all results to SQLite in one big transaction
-///   4. Move processed files to backup
+///   2. Process them in batches of FILES_PER_BATCH:
+///      a. Parse batch in parallel (rayon)  — CPU-bound
+///      b. Write batch to SQLite            — IO-bound
+///      c. Move processed files to backup   — immediate feedback
+///   3. Repeat until all files are done
+///
+/// This keeps memory bounded and moves files continuously instead of
+/// trying to hold all 3000+ files in memory at once.
 pub fn run_once_parallel(
     conn: &mut Connection,
     raw_dir: &Path,
@@ -924,58 +929,65 @@ pub fn run_once_parallel(
         return;
     }
 
+    let total_files = files.len();
+    let batch_size = config::FILES_PER_BATCH;
+    let num_batches = (total_files + batch_size - 1) / batch_size;
+
     info!(
-        "🚀  Found {} JSONL file(s) — parsing in parallel…",
-        files.len()
+        "🚀  Found {} JSONL file(s) — processing in {} batch(es) of up to {}",
+        total_files, num_batches, batch_size,
     );
 
-    // ── Phase 1: Parallel parse ──────────────────────────────────────────
-    let t_parse = Instant::now();
+    let mut files_done = 0usize;
+    let mut total_pos = 0usize;
+    let mut total_lines_all = 0u64;
 
-    // Share the non_commercial set (read-only during parsing) via reference
-    let nc_snapshot: HashSet<i64> = non_commercial_mmsis.clone();
+    for (batch_idx, file_chunk) in files.chunks(batch_size).enumerate() {
+        let t_batch = Instant::now();
 
-    let parsed_files: Vec<ParsedFile> = files
-        .par_iter()
-        .filter_map(|fp| parse_file(fp, &nc_snapshot))
-        .collect();
+        info!(
+            "── Batch {}/{} ({} files) ──────────────────────────",
+            batch_idx + 1,
+            num_batches,
+            file_chunk.len(),
+        );
 
-    let parse_elapsed = t_parse.elapsed();
-    info!(
-        "⚡  Parsing complete: {} files in {:.2}s",
-        parsed_files.len(),
-        parse_elapsed.as_secs_f64(),
-    );
+        // ── Phase 1: Parallel parse this batch ───────────────────────
+        let nc_snapshot: HashSet<i64> = non_commercial_mmsis.clone();
 
-    if parsed_files.is_empty() {
-        return;
-    }
+        let parsed_files: Vec<ParsedFile> = file_chunk
+            .par_iter()
+            .filter_map(|fp| parse_file(fp, &nc_snapshot))
+            .collect();
 
-    // Collect newly-discovered non-commercial MMSIs
-    for pf in &parsed_files {
-        non_commercial_mmsis.extend(&pf.new_non_commercial);
-    }
+        if parsed_files.is_empty() {
+            continue;
+        }
 
-    // ── Phase 2: Batch write to SQLite ───────────────────────────────────
-    let t_write = Instant::now();
+        // Collect newly-discovered non-commercial MMSIs
+        for pf in &parsed_files {
+            non_commercial_mmsis.extend(&pf.new_non_commercial);
+        }
 
-    // Write in batches of up to 20 files per transaction to avoid holding
-    // WAL locks too long while still reducing fsync overhead.
-    let batch_size = 20;
-    for chunk in parsed_files.chunks(batch_size) {
-        match write_all_to_db(conn, chunk) {
+        let batch_lines: u64 = parsed_files.iter().map(|pf| pf.total_lines).sum();
+        let batch_pos: usize = parsed_files.iter().map(|pf| pf.positions.len()).sum();
+
+        // ── Phase 2: Write this batch to SQLite ──────────────────────
+        match write_all_to_db(conn, &parsed_files) {
             Ok(()) => {
-                // Move successfully-written files to backup
-                for pf in chunk {
+                for pf in &parsed_files {
                     move_to_backup(&pf.filepath, backup_dir);
                 }
+                files_done += parsed_files.len();
             }
             Err(e) => {
                 error!("  ❌  Batch write failed: {} — retrying one-by-one", e);
-                // Fallback: write each file individually
-                for pf in chunk {
+                for pf in &parsed_files {
                     match write_parsed_to_db(conn, pf) {
-                        Ok(()) => move_to_backup(&pf.filepath, backup_dir),
+                        Ok(()) => {
+                            move_to_backup(&pf.filepath, backup_dir);
+                            files_done += 1;
+                        }
                         Err(e2) => error!(
                             "  ❌  Failed to ingest {}: {}",
                             pf.filename, e2
@@ -984,21 +996,30 @@ pub fn run_once_parallel(
                 }
             }
         }
+
+        total_pos += batch_pos;
+        total_lines_all += batch_lines;
+
+        let batch_elapsed = t_batch.elapsed();
+        info!(
+            "── Batch {}/{} done: {} lines, {} positions in {:.2}s  ({}/{} files total) ──",
+            batch_idx + 1,
+            num_batches,
+            batch_lines,
+            batch_pos,
+            batch_elapsed.as_secs_f64(),
+            files_done,
+            total_files,
+        );
     }
 
-    let write_elapsed = t_write.elapsed();
     let total_elapsed = t_total.elapsed();
-
-    let total_pos: usize = parsed_files.iter().map(|pf| pf.positions.len()).sum();
-    let total_lines: u64 = parsed_files.iter().map(|pf| pf.total_lines).sum();
-
     info!(
-        "🏁  Done: {} files, {} lines, {} positions in {:.2}s (parse {:.2}s + write {:.2}s)",
-        parsed_files.len(),
-        total_lines,
+        "🏁  All done: {}/{} files, {} lines, {} positions in {:.2}s",
+        files_done,
+        total_files,
+        total_lines_all,
         total_pos,
         total_elapsed.as_secs_f64(),
-        parse_elapsed.as_secs_f64(),
-        write_elapsed.as_secs_f64(),
     );
 }

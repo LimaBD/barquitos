@@ -14,6 +14,10 @@ pub const DATABASE_PATH: &str = "/mnt/wdblack/barquitos.db";
 /// How many JSONL lines to buffer per parallel chunk for intra-file parsing.
 pub const PARSE_CHUNK_SIZE: usize = 10_000;
 
+/// How many files to parse + write per streaming batch.
+/// Keeps memory bounded and moves files to backup continuously.
+pub const FILES_PER_BATCH: usize = 20;
+
 /// JSONL filename glob pattern.
 pub const JSONL_GLOB: &str = "ais_*.jsonl";
 
