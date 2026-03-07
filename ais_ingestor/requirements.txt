@@ -1,2 +1,0 @@
-# filepath: /home/msi/Desktop/barquitos/ais_ingestor/requirements.txt
-# No external dependencies — uses only the Python standard library (sqlite3, json, etc.)
