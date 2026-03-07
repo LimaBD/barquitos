@@ -1,1 +1,0 @@
-/home/msi/Desktop/barquitos/ais_ingestor_rs/target/release/ais_ingestor: /home/msi/Desktop/barquitos/ais_ingestor_rs/src/config.rs /home/msi/Desktop/barquitos/ais_ingestor_rs/src/db.rs /home/msi/Desktop/barquitos/ais_ingestor_rs/src/ingest.rs /home/msi/Desktop/barquitos/ais_ingestor_rs/src/main.rs /home/msi/Desktop/barquitos/ais_ingestor_rs/src/models.rs

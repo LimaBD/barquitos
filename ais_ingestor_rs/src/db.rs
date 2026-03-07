@@ -4,6 +4,8 @@ use rusqlite::Connection;
 use std::path::Path;
 
 /// Schema SQL — creates all tables, indexes, views (idempotent).
+/// All timestamp columns use INTEGER (Unix epoch seconds) for efficient
+/// comparisons and reduced storage on the Raspberry Pi.
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS ship_types (
     ship_type       INTEGER PRIMARY KEY,
@@ -31,16 +33,16 @@ CREATE TABLE IF NOT EXISTS vessels (
     max_draught         REAL,
     ais_version         INTEGER,
     fix_type            INTEGER,
-    first_seen_utc      TEXT NOT NULL,
-    last_seen_utc       TEXT NOT NULL,
-    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    first_seen_utc      INTEGER NOT NULL,
+    last_seen_utc       INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
 );
 
 CREATE TABLE IF NOT EXISTS ship_name_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
     ship_name       TEXT    NOT NULL,
-    timestamp_utc   TEXT    NOT NULL
+    timestamp_utc   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_shipname_mmsi ON ship_name_history(mmsi, timestamp_utc);
 
@@ -48,8 +50,8 @@ CREATE TABLE IF NOT EXISTS destination_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
     destination     TEXT,
-    estimated_arrival TEXT,
-    timestamp_utc   TEXT    NOT NULL
+    estimated_arrival INTEGER,
+    timestamp_utc   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dest_mmsi ON destination_history(mmsi, timestamp_utc);
 CREATE INDEX IF NOT EXISTS idx_dest_dest ON destination_history(destination);
@@ -58,7 +60,7 @@ CREATE TABLE IF NOT EXISTS draught_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
     draught         REAL    NOT NULL,
-    timestamp_utc   TEXT    NOT NULL
+    timestamp_utc   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_draught_mmsi ON draught_history(mmsi, timestamp_utc);
 
@@ -66,14 +68,14 @@ CREATE TABLE IF NOT EXISTS navigational_status_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     navigational_status INTEGER NOT NULL,
-    timestamp_utc       TEXT    NOT NULL
+    timestamp_utc       INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_navstatus_mmsi ON navigational_status_history(mmsi, timestamp_utc);
 
 CREATE TABLE IF NOT EXISTS position_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
-    timestamp_utc   TEXT    NOT NULL,
+    timestamp_utc   INTEGER NOT NULL,
     latitude        REAL    NOT NULL,
     longitude       REAL    NOT NULL,
     speed_over_ground   REAL,

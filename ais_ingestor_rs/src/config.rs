@@ -11,8 +11,8 @@ pub const AIS_BACKUP_DIR: &str = "/mnt/wdblack/ais_processed";
 /// SQLite database file.
 pub const DATABASE_PATH: &str = "/mnt/wdblack/barquitos.db";
 
-/// How many rows to INSERT in a single transaction batch.
-pub const BATCH_SIZE: usize = 5_000;
+/// How many JSONL lines to buffer per parallel chunk for intra-file parsing.
+pub const PARSE_CHUNK_SIZE: usize = 10_000;
 
 /// JSONL filename glob pattern.
 pub const JSONL_GLOB: &str = "ais_*.jsonl";

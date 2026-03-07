@@ -3,11 +3,19 @@
 import os
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from db import init_db
+
+
+def _ts(epoch):
+    """Format a Unix epoch timestamp for display."""
+    if epoch is None:
+        return "N/A"
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
 
 tmp = tempfile.mkdtemp()
 db_path = os.path.join(tmp, "test.db")
@@ -61,7 +69,7 @@ row = conn.execute(
 ).fetchall()
 print("\nDestinations:")
 for r in row:
-    print(f"  MMSI={r[0]} dest={r[1]!r} eta={r[2]} at={r[3]}")
+    print(f"  MMSI={r[0]} dest={r[1]!r} eta={_ts(r[2])} at={_ts(r[3])}")
 
 # 7. Sample draughts
 row = conn.execute(
@@ -69,7 +77,7 @@ row = conn.execute(
 ).fetchall()
 print("\nDraughts:")
 for r in row:
-    print(f"  MMSI={r[0]} draught={r[1]} at={r[2]}")
+    print(f"  MMSI={r[0]} draught={r[1]} at={_ts(r[2])}")
 
 # 8. Nav status history
 row = conn.execute(
@@ -77,7 +85,7 @@ row = conn.execute(
 ).fetchall()
 print("\nNav status history:")
 for r in row:
-    print(f"  MMSI={r[0]} status={r[1]} at={r[2]}")
+    print(f"  MMSI={r[0]} status={r[1]} at={_ts(r[2])}")
 
 # 9. Ship name history
 row = conn.execute(
@@ -85,7 +93,7 @@ row = conn.execute(
 ).fetchall()
 print("\nShip name history:")
 for r in row:
-    print(f"  MMSI={r[0]} name={r[1]!r} at={r[2]}")
+    print(f"  MMSI={r[0]} name={r[1]!r} at={_ts(r[2])}")
 
 conn.close()
 

@@ -51,12 +51,13 @@ log = logging.getLogger("ais_ingestor")
 # ---------------------------------------------------------------------------
 # Time parsing helpers
 # ---------------------------------------------------------------------------
-def parse_ais_time(time_str: str) -> str:
+def parse_ais_time(time_str: str) -> int:
     """
-    Convert the Go-style timestamp from AISstream metadata into ISO-8601.
+    Convert the Go-style timestamp from AISstream metadata into a Unix
+    epoch timestamp (integer seconds).
 
     Example input : '2026-03-04 04:34:59.795811956 +0000 UTC'
-    Example output: '2026-03-04T04:34:59.795811+00:00'
+    Example output: 1772517299
     """
     try:
         clean = time_str.replace(" UTC", "").replace(" +0000", "")
@@ -65,16 +66,21 @@ def parse_ais_time(time_str: str) -> str:
             frac = clean[dot_pos + 1:]
             clean = clean[: dot_pos + 1] + frac[:6]
         dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S.%f")
-        return dt.replace(tzinfo=timezone.utc).isoformat()
+        return int(dt.replace(tzinfo=timezone.utc).timestamp())
     except Exception:
-        return time_str
+        # Last-resort: try ISO-8601 parse
+        try:
+            return int(datetime.fromisoformat(time_str).timestamp())
+        except Exception:
+            return int(datetime.now(timezone.utc).timestamp())
 
 
-def build_eta_iso(eta: dict, reference_time: str) -> str | None:
+def build_eta_timestamp(eta: dict, reference_ts: int) -> int | None:
     """
-    Combine AIS ETA fields (Month, Day, Hour, Minute) into an ISO-8601 string.
+    Combine AIS ETA fields (Month, Day, Hour, Minute) into a Unix epoch
+    timestamp (integer seconds).
 
-    AIS doesn't transmit a year, so we infer it from the reference_time
+    AIS doesn't transmit a year, so we infer it from the reference_ts
     (the message reception timestamp).  Returns None if the ETA is empty
     or clearly invalid (month=0, day=0).
     """
@@ -90,10 +96,7 @@ def build_eta_iso(eta: dict, reference_time: str) -> str | None:
     hour = min(hour, 23)
     minute = min(minute, 59)
 
-    try:
-        ref = datetime.fromisoformat(reference_time)
-    except Exception:
-        ref = datetime.now(timezone.utc)
+    ref = datetime.fromtimestamp(reference_ts, tz=timezone.utc)
 
     year = ref.year
     try:
@@ -108,7 +111,7 @@ def build_eta_iso(eta: dict, reference_time: str) -> str | None:
         except ValueError:
             return None
 
-    return eta_dt.isoformat()
+    return int(eta_dt.timestamp())
 
 
 # ---------------------------------------------------------------------------
@@ -232,14 +235,14 @@ def _extract_destination(msg: dict, meta: dict) -> dict | None:
     if not dest and not any(eta_raw.values()):
         return None
 
-    reported_utc = parse_ais_time(meta.get("time_utc", ""))
-    eta_iso = build_eta_iso(eta_raw, reported_utc)
+    reported_ts = parse_ais_time(meta.get("time_utc", ""))
+    eta_ts = build_eta_timestamp(eta_raw, reported_ts)
 
     return {
         "mmsi": meta.get("MMSI"),
         "destination": dest or None,
-        "estimated_arrival": eta_iso,
-        "timestamp_utc": reported_utc,
+        "estimated_arrival": eta_ts,
+        "timestamp_utc": reported_ts,
     }
 
 
@@ -317,7 +320,7 @@ ON CONFLICT(mmsi) DO UPDATE SET
     ais_version        = COALESCE(excluded.ais_version,        vessels.ais_version),
     fix_type           = COALESCE(excluded.fix_type,           vessels.fix_type),
     last_seen_utc      = MAX(excluded.last_seen_utc, vessels.last_seen_utc),
-    updated_at         = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    updated_at         = CAST(strftime('%s', 'now') AS INTEGER)
 """
 
 _VESSEL_UPSERT_MINIMAL = """
@@ -328,7 +331,7 @@ VALUES
 ON CONFLICT(mmsi) DO UPDATE SET
     ship_name     = COALESCE(excluded.ship_name,  vessels.ship_name),
     last_seen_utc = MAX(excluded.last_seen_utc, vessels.last_seen_utc),
-    updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    updated_at    = CAST(strftime('%s', 'now') AS INTEGER)
 """
 
 _DESTINATION_INSERT = """

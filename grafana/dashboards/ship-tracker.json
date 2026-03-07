@@ -244,13 +244,13 @@
       "targets": [
         {
           "refId": "stationary",
-          "queryText": "SELECT latitude, longitude, ship_name, ship_type_label AS ship_type, category, COALESCE(speed_over_ground, 0) AS speed, COALESCE(course_over_ground, 0) AS course, mmsi, timestamp_utc AS time FROM v_latest_positions WHERE COALESCE(speed_over_ground, 0) < ${speed_threshold} AND ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 10000",
+          "queryText": "SELECT latitude, longitude, ship_name, ship_type_label AS ship_type, category, COALESCE(speed_over_ground, 0) AS speed, COALESCE(course_over_ground, 0) AS course, mmsi, datetime(timestamp_utc, 'unixepoch') AS time FROM v_latest_positions WHERE COALESCE(speed_over_ground, 0) < ${speed_threshold} AND ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 10000",
           "queryType": "table",
           "hide": false
         },
         {
           "refId": "moving",
-          "queryText": "SELECT latitude, longitude, ship_name, ship_type_label AS ship_type, category, COALESCE(speed_over_ground, 0) AS speed, COALESCE(course_over_ground, 0) AS course, mmsi, timestamp_utc AS time FROM v_latest_positions WHERE COALESCE(speed_over_ground, 0) >= ${speed_threshold} AND ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 10000",
+          "queryText": "SELECT latitude, longitude, ship_name, ship_type_label AS ship_type, category, COALESCE(speed_over_ground, 0) AS speed, COALESCE(course_over_ground, 0) AS course, mmsi, datetime(timestamp_utc, 'unixepoch') AS time FROM v_latest_positions WHERE COALESCE(speed_over_ground, 0) >= ${speed_threshold} AND ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 10000",
           "queryType": "table",
           "hide": false
         }
@@ -482,7 +482,7 @@
       "targets": [
         {
           "refId": "A",
-          "queryText": "SELECT ship_name, mmsi, ship_type_label AS ship_type, category, ROUND(latitude, 4) AS lat, ROUND(longitude, 4) AS lon, speed_over_ground AS speed_kn, ROUND(course_over_ground, 1) AS course, true_heading AS heading, timestamp_utc AS last_report FROM v_latest_positions WHERE ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 200",
+          "queryText": "SELECT ship_name, mmsi, ship_type_label AS ship_type, category, ROUND(latitude, 4) AS lat, ROUND(longitude, 4) AS lon, speed_over_ground AS speed_kn, ROUND(course_over_ground, 1) AS course, true_heading AS heading, datetime(timestamp_utc, 'unixepoch') AS last_report FROM v_latest_positions WHERE ('${ship_category:raw}' = '' OR category IN (${ship_category:sqlstring})) AND ('${ship_type_label:raw}' = '' OR ship_type_label IN (${ship_type_label:sqlstring})) ORDER BY timestamp_utc DESC LIMIT 200",
           "queryType": "table"
         }
       ],
@@ -517,7 +517,7 @@
       "targets": [
         {
           "refId": "A",
-          "queryText": "SELECT mmsi, imo_number, ship_name, ship_type_label AS ship_type, category, timestamp_utc, ROUND(latitude, 5) AS lat, ROUND(longitude, 5) AS lon, speed_over_ground AS speed_kn, ROUND(course_over_ground, 1) AS course, true_heading AS heading, rate_of_turn AS rot FROM v_vessel_track WHERE ('${vessel_search:raw}' != '' AND (CAST(mmsi AS TEXT) = '${vessel_search:raw}' OR CAST(imo_number AS TEXT) = '${vessel_search:raw}' OR ship_name LIKE '%${vessel_search:raw}%')) ORDER BY timestamp_utc DESC LIMIT 500",
+          "queryText": "SELECT mmsi, imo_number, ship_name, ship_type_label AS ship_type, category, datetime(timestamp_utc, 'unixepoch') AS timestamp_utc, ROUND(latitude, 5) AS lat, ROUND(longitude, 5) AS lon, speed_over_ground AS speed_kn, ROUND(course_over_ground, 1) AS course, true_heading AS heading, rate_of_turn AS rot FROM v_vessel_track WHERE ('${vessel_search:raw}' != '' AND (CAST(mmsi AS TEXT) = '${vessel_search:raw}' OR CAST(imo_number AS TEXT) = '${vessel_search:raw}' OR ship_name LIKE '%${vessel_search:raw}%')) ORDER BY timestamp_utc DESC LIMIT 500",
           "queryType": "table"
         }
       ],
@@ -544,7 +544,7 @@
       "targets": [
         {
           "refId": "track",
-          "queryText": "SELECT latitude, longitude, ship_name, speed_over_ground AS speed, course_over_ground AS course, timestamp_utc AS time FROM v_vessel_track WHERE ('${vessel_search:raw}' != '' AND (CAST(mmsi AS TEXT) = '${vessel_search:raw}' OR CAST(imo_number AS TEXT) = '${vessel_search:raw}' OR ship_name LIKE '%${vessel_search:raw}%')) ORDER BY timestamp_utc LIMIT 5000",
+          "queryText": "SELECT latitude, longitude, ship_name, speed_over_ground AS speed, course_over_ground AS course, datetime(timestamp_utc, 'unixepoch') AS time FROM v_vessel_track WHERE ('${vessel_search:raw}' != '' AND (CAST(mmsi AS TEXT) = '${vessel_search:raw}' OR CAST(imo_number AS TEXT) = '${vessel_search:raw}' OR ship_name LIKE '%${vessel_search:raw}%')) ORDER BY timestamp_utc LIMIT 5000",
           "queryType": "table",
           "hide": false
         }
@@ -654,7 +654,7 @@
       "targets": [
         {
           "refId": "A",
-          "queryText": "SELECT strftime('%Y-%m-%dT%H:%M:00Z', timestamp_utc) AS time, COUNT(*) AS positions_per_minute FROM position_history WHERE timestamp_utc >= datetime('now', '-24 hours') GROUP BY strftime('%Y-%m-%dT%H:%M', timestamp_utc) ORDER BY time",
+          "queryText": "SELECT strftime('%Y-%m-%dT%H:%M:00Z', timestamp_utc, 'unixepoch') AS time, COUNT(*) AS positions_per_minute FROM position_history WHERE timestamp_utc >= CAST(strftime('%s', 'now', '-24 hours') AS INTEGER) GROUP BY strftime('%Y-%m-%dT%H:%M', timestamp_utc, 'unixepoch') ORDER BY time",
           "queryType": "table"
         }
       ],

@@ -4,6 +4,7 @@
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Allow running from repo root: python -m db.verify
@@ -16,6 +17,13 @@ from db.connection import get_connection  # noqa: E402
 
 # Default DB path — can be overridden with first CLI argument
 DEFAULT_DB = os.path.join("/mnt", "wdblack", "barquitos.db")
+
+
+def _ts(epoch: int | None) -> str:
+    """Format a Unix epoch timestamp as ISO-8601 for display."""
+    if epoch is None:
+        return "N/A"
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
 
 
 def main():
@@ -48,19 +56,19 @@ def main():
     for r in conn.execute(
         "SELECT mmsi, timestamp_utc, latitude, longitude, speed_over_ground, course_over_ground FROM position_history LIMIT 5"
     ):
-        print(f"  MMSI={r[0]}  ts={r[1]}  lat={r[2]:.4f}  lon={r[3]:.4f}  sog={r[4]}  cog={r[5]}")
+        print(f"  MMSI={r[0]}  ts={_ts(r[1])}  lat={r[2]:.4f}  lon={r[3]:.4f}  sog={r[4]}  cog={r[5]}")
 
     print("\n=== SAMPLE DESTINATIONS ===")
     for r in conn.execute(
         "SELECT mmsi, destination, estimated_arrival, timestamp_utc FROM destination_history LIMIT 5"
     ):
-        print(f"  MMSI={r[0]}  dest={r[1]!r}  eta={r[2]}  at={r[3]}")
+        print(f"  MMSI={r[0]}  dest={r[1]!r}  eta={_ts(r[2])}  at={_ts(r[3])}")
 
     print("\n=== SAMPLE DRAUGHTS ===")
     for r in conn.execute(
         "SELECT mmsi, draught, timestamp_utc FROM draught_history LIMIT 5"
     ):
-        print(f"  MMSI={r[0]}  draught={r[1]}  at={r[2]}")
+        print(f"  MMSI={r[0]}  draught={r[1]}  at={_ts(r[2])}")
 
     print("\n=== SAMPLE NAV STATUS CHANGES ===")
     for r in conn.execute(
@@ -69,7 +77,7 @@ def main():
            LEFT JOIN nav_statuses ns ON ns.navigational_status = h.navigational_status
            LIMIT 5"""
     ):
-        print(f"  MMSI={r[0]}  status={r[1]!r}  at={r[2]}")
+        print(f"  MMSI={r[0]}  status={r[1]!r}  at={_ts(r[2])}")
 
     print("\n=== SPATIAL: vessels near Barcelona ===")
     for r in conn.execute("""

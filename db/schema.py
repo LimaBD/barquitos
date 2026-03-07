@@ -11,6 +11,10 @@ Tables are designed for global trade intelligence & vessel tracking:
   - `navigational_status_history`   : Nav status changes (infrequent, ~3/month).
   - `position_history`              : Time-series of position observations (FK → vessels).
 
+All timestamp columns store Unix epoch seconds (INTEGER).  This avoids the
+overhead of ISO-8601 string parsing in SQLite comparisons, sorts and indexes,
+and reduces storage on the Raspberry Pi.
+
 Views:
   - `v_total_vessels`       : Total number of distinct vessels.
   - `v_vessels_by_type`     : Vessel count grouped by ship type (with label & category).
@@ -48,6 +52,7 @@ CREATE TABLE IF NOT EXISTS nav_statuses (
 
 -- =========================================================================
 -- Vessels  (one row per MMSI – upserted on every ShipStaticData message)
+-- All timestamps are Unix epoch seconds (INTEGER).
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS vessels (
     mmsi                INTEGER PRIMARY KEY,
@@ -64,9 +69,9 @@ CREATE TABLE IF NOT EXISTS vessels (
     max_draught         REAL,
     ais_version         INTEGER,
     fix_type            INTEGER,
-    first_seen_utc      TEXT NOT NULL,
-    last_seen_utc       TEXT NOT NULL,
-    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    first_seen_utc      INTEGER NOT NULL,
+    last_seen_utc       INTEGER NOT NULL,
+    updated_at          INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
 );
 
 -- =========================================================================
@@ -76,7 +81,7 @@ CREATE TABLE IF NOT EXISTS ship_name_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     ship_name           TEXT    NOT NULL,
-    timestamp_utc       TEXT    NOT NULL
+    timestamp_utc       INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_shipname_mmsi ON ship_name_history(mmsi, timestamp_utc);
@@ -88,8 +93,8 @@ CREATE TABLE IF NOT EXISTS destination_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     destination         TEXT,
-    estimated_arrival   TEXT,
-    timestamp_utc       TEXT    NOT NULL
+    estimated_arrival   INTEGER,
+    timestamp_utc       INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_dest_mmsi ON destination_history(mmsi, timestamp_utc);
@@ -102,7 +107,7 @@ CREATE TABLE IF NOT EXISTS draught_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     draught             REAL    NOT NULL,
-    timestamp_utc       TEXT    NOT NULL
+    timestamp_utc       INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_draught_mmsi ON draught_history(mmsi, timestamp_utc);
@@ -115,7 +120,7 @@ CREATE TABLE IF NOT EXISTS navigational_status_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     navigational_status INTEGER NOT NULL,
-    timestamp_utc       TEXT    NOT NULL
+    timestamp_utc       INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_navstatus_mmsi ON navigational_status_history(mmsi, timestamp_utc);
@@ -126,7 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_navstatus_mmsi ON navigational_status_history(mms
 CREATE TABLE IF NOT EXISTS position_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
-    timestamp_utc       TEXT    NOT NULL,
+    timestamp_utc       INTEGER NOT NULL,
     latitude            REAL    NOT NULL,
     longitude           REAL    NOT NULL,
     speed_over_ground   REAL,
@@ -339,13 +344,13 @@ INSERT OR IGNORE INTO ship_types (ship_type, label, category) VALUES (?, ?, ?);
 # record within that window.
 #
 # Parameters:
-#   :target_ts  — ISO-8601 UTC timestamp, e.g. '2026-03-04T04:35:00Z'
+#   :target_ts  — Unix epoch seconds (INTEGER), e.g. 1772517300
 #   :ship_type  — (optional) ship-type code to filter by; pass NULL to
 #                  include all vessel types.
 #
 # Usage:
-#   conn.execute(VESSEL_POSITIONS_AT_SQL, {"target_ts": "...", "ship_type": None})
-#   conn.execute(VESSEL_POSITIONS_AT_SQL, {"target_ts": "...", "ship_type": 80})
+#   conn.execute(VESSEL_POSITIONS_AT_SQL, {"target_ts": 1772517300, "ship_type": None})
+#   conn.execute(VESSEL_POSITIONS_AT_SQL, {"target_ts": 1772517300, "ship_type": 80})
 # =========================================================================
 VESSEL_POSITIONS_AT_SQL = """
 WITH candidates AS (
@@ -357,13 +362,13 @@ WITH candidates AS (
         ph.speed_over_ground,
         ph.course_over_ground,
         ph.true_heading,
-        ABS(strftime('%s', ph.timestamp_utc) - strftime('%s', :target_ts)) AS diff_seconds,
+        ABS(ph.timestamp_utc - :target_ts) AS diff_seconds,
         ROW_NUMBER() OVER (
             PARTITION BY ph.mmsi
-            ORDER BY ABS(strftime('%s', ph.timestamp_utc) - strftime('%s', :target_ts))
+            ORDER BY ABS(ph.timestamp_utc - :target_ts)
         ) AS rn
     FROM position_history ph
-    WHERE ABS(strftime('%s', ph.timestamp_utc) - strftime('%s', :target_ts)) <= 5
+    WHERE ph.timestamp_utc BETWEEN (:target_ts - 5) AND (:target_ts + 5)
 )
 SELECT
     c.mmsi,

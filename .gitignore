@@ -27,6 +27,9 @@ env/
 # ----- Environment / Secrets ------------------------------------------------
 .env
 
+# ----- Rust ------------------------------------------------------------------
+ais_ingestor_rs/target/
+
 # ----- Data (large / generated) ---------------------------------------------
 # Raw AIS JSONL files (collected data — too large for git)
 ais_collector/data_samples/

@@ -116,7 +116,7 @@ ts = conn.execute(
     "SELECT timestamp_utc FROM position_history ORDER BY timestamp_utc LIMIT 1"
 ).fetchone()[0]
 rows = conn.execute(VESSEL_POSITIONS_AT_SQL, {"target_ts": ts, "ship_type": None}).fetchall()
-print(f"\nVESSEL_POSITIONS_AT_SQL  target={ts}")
+print(f"\nVESSEL_POSITIONS_AT_SQL  target={ts} (epoch seconds)")
 print(f"  All types → {len(rows)} vessels")
 assert len(rows) > 0, "Expected at least one vessel within ±5s of a known position timestamp"
 r = rows[0]
@@ -139,7 +139,7 @@ print("  ✅ OK")
 # 9. VESSEL_POSITIONS_AT_SQL  (no data within window → empty)
 # ------------------------------------------------------------------
 rows_empty = conn.execute(
-    VESSEL_POSITIONS_AT_SQL, {"target_ts": "1999-01-01T00:00:00Z", "ship_type": None}
+    VESSEL_POSITIONS_AT_SQL, {"target_ts": 915148800, "ship_type": None}
 ).fetchall()
 print(f"  Far-away timestamp → {len(rows_empty)} vessels")
 assert len(rows_empty) == 0, "Expected no results for distant timestamp"
