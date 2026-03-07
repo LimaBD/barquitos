@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# filepath: /home/msi/Desktop/barquitos/db/verify.py
 """Quick verification of the barquitos database."""
 
 import os
@@ -28,7 +27,11 @@ def main():
     conn = get_connection(db_path)
 
     print("=== ROW COUNTS ===")
-    for t in ["ship_types", "vessels", "ports", "voyages", "position_reports", "position_reports_rtree"]:
+    for t in [
+        "ship_types", "nav_statuses", "vessels",
+        "ship_name_history", "destination_history", "draught_history",
+        "navigational_status_history", "position_history", "position_history_rtree",
+    ]:
         n = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
         print(f"  {t:35s} {n:>10,}")
 
@@ -43,38 +46,42 @@ def main():
 
     print("\n=== SAMPLE POSITIONS ===")
     for r in conn.execute(
-        "SELECT mmsi, timestamp_utc, latitude, longitude, sog, cog, voyage_id FROM position_reports LIMIT 5"
+        "SELECT mmsi, timestamp_utc, latitude, longitude, speed_over_ground, course_over_ground FROM position_history LIMIT 5"
     ):
-        print(f"  MMSI={r[0]}  ts={r[1]}  lat={r[2]:.4f}  lon={r[3]:.4f}  sog={r[4]}  cog={r[5]}  voy={r[6]}")
+        print(f"  MMSI={r[0]}  ts={r[1]}  lat={r[2]:.4f}  lon={r[3]:.4f}  sog={r[4]}  cog={r[5]}")
 
-    print("\n=== SAMPLE VOYAGES ===")
+    print("\n=== SAMPLE DESTINATIONS ===")
     for r in conn.execute(
-        "SELECT mmsi, destination, eta, cargo_status, draught, reported_utc FROM voyages LIMIT 5"
+        "SELECT mmsi, destination, estimated_arrival, timestamp_utc FROM destination_history LIMIT 5"
     ):
-        print(f"  MMSI={r[0]}  dest={r[1]!r}  eta={r[2]}  cargo={r[3]}  draught={r[4]}  at={r[5]}")
+        print(f"  MMSI={r[0]}  dest={r[1]!r}  eta={r[2]}  at={r[3]}")
+
+    print("\n=== SAMPLE DRAUGHTS ===")
+    for r in conn.execute(
+        "SELECT mmsi, draught, timestamp_utc FROM draught_history LIMIT 5"
+    ):
+        print(f"  MMSI={r[0]}  draught={r[1]}  at={r[2]}")
+
+    print("\n=== SAMPLE NAV STATUS CHANGES ===")
+    for r in conn.execute(
+        """SELECT h.mmsi, ns.label, h.timestamp_utc
+           FROM navigational_status_history h
+           LEFT JOIN nav_statuses ns ON ns.navigational_status = h.navigational_status
+           LIMIT 5"""
+    ):
+        print(f"  MMSI={r[0]}  status={r[1]!r}  at={r[2]}")
 
     print("\n=== SPATIAL: vessels near Barcelona ===")
     for r in conn.execute("""
         SELECT DISTINCT v.mmsi, v.ship_name, p.latitude, p.longitude
-        FROM position_reports_rtree AS rt
-        JOIN position_reports AS p ON p.id = rt.id
+        FROM position_history_rtree AS rt
+        JOIN position_history AS p ON p.id = rt.id
         JOIN vessels AS v ON v.mmsi = p.mmsi
         WHERE rt.min_lat >= 41.0 AND rt.max_lat <= 41.5
           AND rt.min_lon >= 2.0  AND rt.max_lon <= 2.5
         LIMIT 5
     """):
         print(f"  MMSI={r[0]}  name={r[1]!r}  lat={r[2]:.4f}  lon={r[3]:.4f}")
-
-    print("\n=== VESSEL STATUS VIEW (sample) ===")
-    for r in conn.execute(
-        """SELECT mmsi, ship_name, ship_type_label, ship_type_category,
-                  last_lat, last_lon, last_sog, destination, eta, cargo_status
-           FROM v_vessel_status
-           WHERE destination IS NOT NULL LIMIT 5"""
-    ):
-        print(f"  MMSI={r[0]}  {r[1]!r}  [{r[2]}/{r[3]}]  "
-              f"pos=({r[4]:.4f},{r[5]:.4f})  sog={r[6]}  "
-              f"dest={r[7]!r}  eta={r[8]}  cargo={r[9]}")
 
     sz = os.path.getsize(db_path)
     print(f"\n=== DB SIZE: {sz/1024/1024:.1f} MB ===")

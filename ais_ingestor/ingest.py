@@ -111,22 +111,6 @@ def build_eta_iso(eta: dict, reference_time: str) -> str | None:
     return eta_dt.isoformat()
 
 
-def infer_cargo_status(draught: float | None, max_draught: float | None) -> str | None:
-    """
-    Rough heuristic: if current draught > 60 % of max → laden, else ballast.
-
-    Returns None when we can't determine.
-    """
-    if draught is None or max_draught is None or max_draught <= 0:
-        return None
-    ratio = draught / max_draught
-    if ratio > 0.6:
-        return "laden"
-    elif ratio > 0:
-        return "ballast"
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Non-commercial vessel filtering
 # ---------------------------------------------------------------------------
@@ -171,14 +155,29 @@ def _extract_position(msg: dict, meta: dict) -> dict | None:
         "timestamp_utc": parse_ais_time(meta.get("time_utc", "")),
         "latitude": lat,
         "longitude": lon,
-        "sog": report.get("Sog"),
-        "cog": report.get("Cog"),
+        "speed_over_ground": report.get("Sog"),
+        "course_over_ground": report.get("Cog"),
         "true_heading": report.get("TrueHeading"),
-        "nav_status": report.get("NavigationalStatus"),
-        "rot": report.get("RateOfTurn"),
-        "message_id": report.get("MessageID"),
-        "position_accuracy": int(report.get("PositionAccuracy", False)),
-        "raim": int(report.get("Raim", False)),
+        "rate_of_turn": report.get("RateOfTurn"),
+    }
+
+
+def _extract_nav_status(msg: dict, meta: dict) -> dict | None:
+    """Extract navigational status from a position report message."""
+    report = (
+        msg.get("PositionReport")
+        or msg.get("StandardClassBPositionReport")
+        or msg.get("ExtendedClassBPositionReport")
+    )
+    if report is None:
+        return None
+    nav_status = report.get("NavigationalStatus")
+    if nav_status is None:
+        return None
+    return {
+        "mmsi": meta.get("MMSI"),
+        "navigational_status": nav_status,
+        "timestamp_utc": parse_ais_time(meta.get("time_utc", "")),
     }
 
 
@@ -210,10 +209,10 @@ def _extract_vessel_static(msg: dict, meta: dict) -> dict | None:
         "call_sign": (static.get("CallSign") or "").strip() or None,
         "imo_number": static.get("ImoNumber") or None,
         "ship_type": static.get("Type") or static.get("ShipType"),
-        "dim_a": dim_a,
-        "dim_b": dim_b,
-        "dim_c": dim_c,
-        "dim_d": dim_d,
+        "dimension_to_bow": dim_a,
+        "dimension_to_stern": dim_b,
+        "dimension_to_port": dim_c,
+        "dimension_to_starboard": dim_d,
         "length_m": length_m,
         "beam_m": beam_m,
         "max_draught": static.get("MaximumStaticDraught"),
@@ -223,8 +222,8 @@ def _extract_vessel_static(msg: dict, meta: dict) -> dict | None:
     }
 
 
-def _extract_voyage(msg: dict, meta: dict, vessel_draughts: dict) -> dict | None:
-    """Extract voyage info (destination & ETA) from ShipStaticData."""
+def _extract_destination(msg: dict, meta: dict) -> dict | None:
+    """Extract destination & ETA from ShipStaticData."""
     static = msg.get("ShipStaticData")
     if static is None:
         return None
@@ -236,18 +235,47 @@ def _extract_voyage(msg: dict, meta: dict, vessel_draughts: dict) -> dict | None
     reported_utc = parse_ais_time(meta.get("time_utc", ""))
     eta_iso = build_eta_iso(eta_raw, reported_utc)
 
-    mmsi = meta.get("MMSI")
-    draught = static.get("MaximumStaticDraught")
-    max_draught = vessel_draughts.get(mmsi)
-    cargo_status = infer_cargo_status(draught, max_draught)
-
     return {
-        "mmsi": mmsi,
+        "mmsi": meta.get("MMSI"),
         "destination": dest or None,
-        "eta": eta_iso,
+        "estimated_arrival": eta_iso,
+        "timestamp_utc": reported_utc,
+    }
+
+
+def _extract_draught(msg: dict, meta: dict) -> dict | None:
+    """Extract draught from ShipStaticData."""
+    static = msg.get("ShipStaticData")
+    if static is None:
+        return None
+    draught = static.get("MaximumStaticDraught")
+    if draught is None or draught <= 0:
+        return None
+    return {
+        "mmsi": meta.get("MMSI"),
         "draught": draught,
-        "cargo_status": cargo_status,
-        "reported_utc": reported_utc,
+        "timestamp_utc": parse_ais_time(meta.get("time_utc", "")),
+    }
+
+
+def _extract_ship_name(msg: dict, meta: dict) -> dict | None:
+    """Extract ship name from ShipStaticData for name-change tracking."""
+    static = msg.get("ShipStaticData") or msg.get("StaticDataReport")
+    if static is None:
+        return None
+    report_a = static.get("ReportA", {}) or {}
+    name = (
+        static.get("Name")
+        or report_a.get("Name")
+        or meta.get("ShipName", "")
+    )
+    name = name.strip() if name else None
+    if not name:
+        return None
+    return {
+        "mmsi": meta.get("MMSI"),
+        "ship_name": name,
+        "timestamp_utc": parse_ais_time(meta.get("time_utc", "")),
     }
 
 
@@ -255,39 +283,41 @@ def _extract_voyage(msg: dict, meta: dict, vessel_draughts: dict) -> dict | None
 # SQL templates
 # ---------------------------------------------------------------------------
 _POSITION_INSERT = """
-INSERT INTO position_reports
-    (mmsi, voyage_id, timestamp_utc, latitude, longitude, sog, cog,
-     true_heading, nav_status, rot, message_id, position_accuracy, raim)
+INSERT INTO position_history
+    (mmsi, timestamp_utc, latitude, longitude, speed_over_ground,
+     course_over_ground, true_heading, rate_of_turn)
 VALUES
-    (:mmsi, :voyage_id, :timestamp_utc, :latitude, :longitude, :sog, :cog,
-     :true_heading, :nav_status, :rot, :message_id, :position_accuracy, :raim)
+    (:mmsi, :timestamp_utc, :latitude, :longitude, :speed_over_ground,
+     :course_over_ground, :true_heading, :rate_of_turn)
 """
 
 _VESSEL_UPSERT = """
 INSERT INTO vessels
     (mmsi, ship_name, call_sign, imo_number, ship_type,
-     dim_a, dim_b, dim_c, dim_d, length_m, beam_m, max_draught,
+     dimension_to_bow, dimension_to_stern, dimension_to_port, dimension_to_starboard,
+     length_m, beam_m, max_draught,
      ais_version, fix_type, first_seen_utc, last_seen_utc)
 VALUES
     (:mmsi, :ship_name, :call_sign, :imo_number, :ship_type,
-     :dim_a, :dim_b, :dim_c, :dim_d, :length_m, :beam_m, :max_draught,
+     :dimension_to_bow, :dimension_to_stern, :dimension_to_port, :dimension_to_starboard,
+     :length_m, :beam_m, :max_draught,
      :ais_version, :fix_type, :seen_utc, :seen_utc)
 ON CONFLICT(mmsi) DO UPDATE SET
-    ship_name      = COALESCE(excluded.ship_name,      vessels.ship_name),
-    call_sign      = COALESCE(excluded.call_sign,      vessels.call_sign),
-    imo_number     = COALESCE(excluded.imo_number,      vessels.imo_number),
-    ship_type      = COALESCE(excluded.ship_type,       vessels.ship_type),
-    dim_a          = COALESCE(excluded.dim_a,            vessels.dim_a),
-    dim_b          = COALESCE(excluded.dim_b,            vessels.dim_b),
-    dim_c          = COALESCE(excluded.dim_c,            vessels.dim_c),
-    dim_d          = COALESCE(excluded.dim_d,            vessels.dim_d),
-    length_m       = COALESCE(excluded.length_m,         vessels.length_m),
-    beam_m         = COALESCE(excluded.beam_m,           vessels.beam_m),
-    max_draught    = COALESCE(excluded.max_draught,      vessels.max_draught),
-    ais_version    = COALESCE(excluded.ais_version,      vessels.ais_version),
-    fix_type       = COALESCE(excluded.fix_type,         vessels.fix_type),
-    last_seen_utc  = MAX(excluded.last_seen_utc, vessels.last_seen_utc),
-    updated_at     = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    ship_name          = COALESCE(excluded.ship_name,          vessels.ship_name),
+    call_sign          = COALESCE(excluded.call_sign,          vessels.call_sign),
+    imo_number         = COALESCE(excluded.imo_number,         vessels.imo_number),
+    ship_type          = COALESCE(excluded.ship_type,          vessels.ship_type),
+    dimension_to_bow       = COALESCE(excluded.dimension_to_bow,       vessels.dimension_to_bow),
+    dimension_to_stern     = COALESCE(excluded.dimension_to_stern,     vessels.dimension_to_stern),
+    dimension_to_port      = COALESCE(excluded.dimension_to_port,      vessels.dimension_to_port),
+    dimension_to_starboard = COALESCE(excluded.dimension_to_starboard, vessels.dimension_to_starboard),
+    length_m           = COALESCE(excluded.length_m,           vessels.length_m),
+    beam_m             = COALESCE(excluded.beam_m,             vessels.beam_m),
+    max_draught        = COALESCE(excluded.max_draught,        vessels.max_draught),
+    ais_version        = COALESCE(excluded.ais_version,        vessels.ais_version),
+    fix_type           = COALESCE(excluded.fix_type,           vessels.fix_type),
+    last_seen_utc      = MAX(excluded.last_seen_utc, vessels.last_seen_utc),
+    updated_at         = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 """
 
 _VESSEL_UPSERT_MINIMAL = """
@@ -301,11 +331,26 @@ ON CONFLICT(mmsi) DO UPDATE SET
     updated_at    = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 """
 
-_VOYAGE_INSERT = """
-INSERT INTO voyages
-    (mmsi, destination, eta, draught, cargo_status, reported_utc)
+_DESTINATION_INSERT = """
+INSERT INTO destination_history
+    (mmsi, destination, estimated_arrival, timestamp_utc)
 VALUES
-    (:mmsi, :destination, :eta, :draught, :cargo_status, :reported_utc)
+    (:mmsi, :destination, :estimated_arrival, :timestamp_utc)
+"""
+
+_DRAUGHT_INSERT = """
+INSERT INTO draught_history (mmsi, draught, timestamp_utc)
+VALUES (:mmsi, :draught, :timestamp_utc)
+"""
+
+_NAV_STATUS_INSERT = """
+INSERT INTO navigational_status_history (mmsi, navigational_status, timestamp_utc)
+VALUES (:mmsi, :navigational_status, :timestamp_utc)
+"""
+
+_SHIP_NAME_INSERT = """
+INSERT INTO ship_name_history (mmsi, ship_name, timestamp_utc)
+VALUES (:mmsi, :ship_name, :timestamp_utc)
 """
 
 
@@ -336,24 +381,12 @@ def process_file(conn, filepath: str, backup_dir: str) -> bool:
     positions: list[dict] = []
     vessels_static: list[dict] = []
     vessels_minimal: dict[int, dict] = {}
-    voyages: list[dict] = []
-    # Track the latest voyage id per MMSI so position reports can reference it
-    _latest_voyage_id: dict[int, int] = {}
-    # Track max draughts from static data for cargo_status inference
-    _vessel_draughts: dict[int, float] = {}
+    destinations: list[dict] = []
+    draughts: list[dict] = []
+    nav_statuses: list[dict] = []
+    ship_names: list[dict] = []
     total_lines = 0
     skipped_non_commercial = 0
-
-    # Pre-load known max draughts from DB for cargo-status inference
-    for row in conn.execute("SELECT mmsi, max_draught FROM vessels WHERE max_draught IS NOT NULL"):
-        _vessel_draughts[row[0]] = row[1]
-
-    # Pre-load latest voyage per MMSI from DB
-    for row in conn.execute(
-        """SELECT mmsi, id FROM voyages
-           WHERE id IN (SELECT MAX(id) FROM voyages GROUP BY mmsi)"""
-    ):
-        _latest_voyage_id[row[0]] = row[1]
 
     with open(filepath, "r", encoding="utf-8") as fh:
         for line in fh:
@@ -391,13 +424,17 @@ def process_file(conn, filepath: str, backup_dir: str) -> bool:
 
                     vessels_static.append(vs)
 
-                    # Track draught for cargo-status inference
-                    if vs["max_draught"]:
-                        _vessel_draughts[vs["mmsi"]] = vs["max_draught"]
+                dest = _extract_destination(msg, meta)
+                if dest and dest["mmsi"]:
+                    destinations.append(dest)
 
-                voy = _extract_voyage(msg, meta, _vessel_draughts)
-                if voy and voy["mmsi"]:
-                    voyages.append(voy)
+                dr = _extract_draught(msg, meta)
+                if dr and dr["mmsi"]:
+                    draughts.append(dr)
+
+                sn = _extract_ship_name(msg, meta)
+                if sn and sn["mmsi"]:
+                    ship_names.append(sn)
 
             # --- Position ---------------------------------------------------
             elif msg_type in (
@@ -408,14 +445,16 @@ def process_file(conn, filepath: str, backup_dir: str) -> bool:
             ):
                 pos = _extract_position(msg, meta)
                 if pos and pos["mmsi"]:
-                    # Attach the latest known voyage for this MMSI
-                    pos["voyage_id"] = _latest_voyage_id.get(mmsi)
                     positions.append(pos)
                     vessels_minimal[mmsi] = {
                         "mmsi": mmsi,
                         "ship_name": (meta.get("ShipName") or "").strip() or None,
                         "seen_utc": parse_ais_time(meta.get("time_utc", "")),
                     }
+
+                ns = _extract_nav_status(msg, meta)
+                if ns and ns["mmsi"]:
+                    nav_statuses.append(ns)
 
             # --- Other message types (BaseStationReport, etc.) --------------
             else:
@@ -436,19 +475,19 @@ def process_file(conn, filepath: str, backup_dir: str) -> bool:
         if vessels_minimal:
             cur.executemany(_VESSEL_UPSERT_MINIMAL, list(vessels_minimal.values()))
 
-        # 2) Insert voyages and capture their IDs for position back-linking
-        for voy in voyages:
-            cur.execute(_VOYAGE_INSERT, voy)
-            voyage_id = cur.lastrowid
-            _latest_voyage_id[voy["mmsi"]] = voyage_id
-
-        # Update voyage_id on positions that were collected *after* a voyage in this file
-        # (positions extracted before the voyage in the file already have voyage_id=None
-        #  or a previous voyage; this is acceptable — AIS ordering is best-effort)
+        # 2) Insert history tables
+        if destinations:
+            cur.executemany(_DESTINATION_INSERT, destinations)
+        if draughts:
+            cur.executemany(_DRAUGHT_INSERT, draughts)
+        if nav_statuses:
+            cur.executemany(_NAV_STATUS_INSERT, nav_statuses)
+        if ship_names:
+            cur.executemany(_SHIP_NAME_INSERT, ship_names)
 
         # 3) Get the current max id so we know which rows are new
         max_id_before = cur.execute(
-            "SELECT COALESCE(MAX(id), 0) FROM position_reports"
+            "SELECT COALESCE(MAX(id), 0) FROM position_history"
         ).fetchone()[0]
 
         # Insert positions in batches
@@ -458,9 +497,9 @@ def process_file(conn, filepath: str, backup_dir: str) -> bool:
 
         # Populate the R*Tree for all newly inserted rows in one go
         cur.execute(
-            """INSERT INTO position_reports_rtree (id, min_lat, max_lat, min_lon, max_lon)
+            """INSERT INTO position_history_rtree (id, min_lat, max_lat, min_lon, max_lon)
                SELECT id, latitude, latitude, longitude, longitude
-               FROM position_reports
+               FROM position_history
                WHERE id > ?""",
             (max_id_before,),
         )
@@ -472,11 +511,15 @@ def process_file(conn, filepath: str, backup_dir: str) -> bool:
         return False
 
     log.info(
-        "  ✅  %s → %d positions, %d voyages, %d static, %d minimal vessels "
+        "  ✅  %s → %d positions, %d destinations, %d draughts, %d nav_statuses, "
+        "%d ship_names, %d static, %d minimal vessels "
         "(%d lines, %d skipped non-commercial)",
         filename,
         len(positions),
-        len(voyages),
+        len(destinations),
+        len(draughts),
+        len(nav_statuses),
+        len(ship_names),
         len(vessels_static),
         len(vessels_minimal),
         total_lines,

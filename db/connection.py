@@ -9,7 +9,7 @@ Provides helpers for:
 import sqlite3
 from pathlib import Path
 
-from db.schema import SCHEMA_SQL, SHIP_TYPE_SEED, SEED_SHIP_TYPES_SQL
+from db.schema import SCHEMA_SQL, SHIP_TYPE_SEED, SEED_SHIP_TYPES_SQL, NAV_STATUS_SEED, SEED_NAV_STATUSES_SQL
 
 
 def get_connection(db_path: str) -> sqlite3.Connection:
@@ -41,5 +41,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
     conn.executescript(SCHEMA_SQL)
     # Seed ship-type lookup (INSERT OR IGNORE — safe to run every time)
     conn.executemany(SEED_SHIP_TYPES_SQL, SHIP_TYPE_SEED)
+    # Seed navigational-status lookup
+    conn.executemany(SEED_NAV_STATUSES_SQL, NAV_STATUS_SEED)
     conn.commit()
     return conn

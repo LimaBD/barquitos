@@ -17,17 +17,19 @@ for f in samples:
     fp = os.path.join(data_dir, f)
     process_file(conn, fp, backup_dir)
 
-n_linked = conn.execute("SELECT COUNT(*) FROM position_reports WHERE voyage_id IS NOT NULL").fetchone()[0]
-n_total = conn.execute("SELECT COUNT(*) FROM position_reports").fetchone()[0]
-print(f"\nPositions linked to a voyage: {n_linked}/{n_total}")
+n_total = conn.execute("SELECT COUNT(*) FROM position_history").fetchone()[0]
+n_dest = conn.execute("SELECT COUNT(*) FROM destination_history").fetchone()[0]
+n_nav = conn.execute("SELECT COUNT(*) FROM navigational_status_history").fetchone()[0]
+print(f"\nPositions: {n_total}  Destinations: {n_dest}  Nav statuses: {n_nav}")
 
 rows = conn.execute("""
-    SELECT p.mmsi, p.timestamp_utc, v.destination, v.eta
-    FROM position_reports p
-    JOIN voyages v ON v.id = p.voyage_id
+    SELECT p.mmsi, p.timestamp_utc, d.destination, d.estimated_arrival
+    FROM position_history p
+    JOIN destination_history d ON d.mmsi = p.mmsi
+    GROUP BY p.mmsi
     LIMIT 5
 """).fetchall()
-print("Linked positions:")
+print("Positions with destination (via mmsi join):")
 for r in rows:
     print(f"  MMSI={r[0]} ts={r[1]} dest={r[2]!r} eta={r[3]}")
 

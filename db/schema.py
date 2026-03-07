@@ -2,153 +2,142 @@
 Database schema definitions.
 
 Tables are designed for global trade intelligence & vessel tracking:
-  - `ship_types`        : Lookup table mapping AIS ship-type codes → labels.
-  - `vessels`           : One row per MMSI. Ship identity, static info & computed dimensions.
-  - `ports`             : Known ports / anchorages (enriched over time from AIS destinations).
-  - `voyages`           : Destination / ETA snapshots from ShipStaticData (FK → vessels, ports).
-  - `position_reports`  : Time-series of position observations (FK → vessels, optionally → voyages).
+  - `ship_types`                    : Lookup table mapping AIS ship-type codes → labels.
+  - `nav_statuses`                  : Lookup table mapping AIS navigational-status codes → labels.
+  - `vessels`                       : One row per MMSI. Ship identity, static info & computed dimensions.
+  - `ship_name_history`             : Track ship name changes over time.
+  - `destination_history`           : Destination & ETA snapshots from ShipStaticData.
+  - `draught_history`               : Draught snapshots from ShipStaticData.
+  - `navigational_status_history`   : Nav status changes (infrequent, ~3/month).
+  - `position_history`              : Time-series of position observations (FK → vessels).
 
-An R*Tree virtual table (`position_reports_rtree`) gives fast spatial look-ups
+An R*Tree virtual table (`position_history_rtree`) gives fast spatial look-ups
 without needing the SpatiaLite extension (works on stock SQLite / RPi).
 """
 
 SCHEMA_SQL = """
 -- =========================================================================
--- Ship-type lookup  (AIS type code → human-readable label & category)
+-- Ship-type lookup
 -- Populated once via seed data; new codes can be added at any time.
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS ship_types (
-    ship_type       INTEGER PRIMARY KEY,     -- AIS ship/cargo type code
-    label           TEXT    NOT NULL,         -- e.g. "Bulk Carrier"
-    category        TEXT                      -- coarse grouping: Cargo, Tanker, Passenger, …
+    ship_type       INTEGER PRIMARY KEY,
+    label           TEXT    NOT NULL,
+    category        TEXT
+);
+
+-- =========================================================================
+-- Navigational-status lookup
+-- Populated once via seed data; codes defined in ITU-R M.1371-5, Table 45.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS nav_statuses (
+    navigational_status INTEGER PRIMARY KEY,
+    label               TEXT    NOT NULL
 );
 
 -- =========================================================================
 -- Vessels  (one row per MMSI – upserted on every ShipStaticData message)
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS vessels (
-    mmsi            INTEGER PRIMARY KEY,
-    ship_name       TEXT,
-    call_sign       TEXT,
-    imo_number      INTEGER,
-    ship_type       INTEGER,           -- AIS type code (see ship_types table for labels)
-    dim_a           INTEGER,          -- bow
-    dim_b           INTEGER,          -- stern
-    dim_c           INTEGER,          -- port
-    dim_d           INTEGER,          -- starboard
-    length_m        REAL,             -- dim_a + dim_b  (computed on upsert)
-    beam_m          REAL,             -- dim_c + dim_d  (computed on upsert)
-    max_draught     REAL,
-    ais_version     INTEGER,
-    fix_type        INTEGER,
-    first_seen_utc  TEXT NOT NULL,    -- ISO-8601
-    last_seen_utc   TEXT NOT NULL,    -- ISO-8601
-    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    mmsi                INTEGER PRIMARY KEY,
+    ship_name           TEXT,
+    call_sign           TEXT,
+    imo_number          INTEGER,
+    ship_type           INTEGER,
+    dimension_to_bow       INTEGER,
+    dimension_to_stern     INTEGER,
+    dimension_to_port      INTEGER,
+    dimension_to_starboard INTEGER,
+    length_m            REAL,
+    beam_m              REAL,
+    max_draught         REAL,
+    ais_version         INTEGER,
+    fix_type            INTEGER,
+    first_seen_utc      TEXT NOT NULL,
+    last_seen_utc       TEXT NOT NULL,
+    updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 -- =========================================================================
--- Ports  (known destinations / anchorages, enriched over time)
+-- Ship-name history  (ship names can change over time)
 -- =========================================================================
-CREATE TABLE IF NOT EXISTS ports (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    name            TEXT    NOT NULL UNIQUE,  -- normalised destination string
-    country         TEXT,                     -- ISO-3166-1 alpha-2
-    latitude        REAL,
-    longitude       REAL,
-    unlocode        TEXT                      -- UN/LOCODE when known
+CREATE TABLE IF NOT EXISTS ship_name_history (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
+    ship_name           TEXT    NOT NULL,
+    timestamp_utc       TEXT    NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_port_name ON ports(name);
+CREATE INDEX IF NOT EXISTS idx_shipname_mmsi ON ship_name_history(mmsi, timestamp_utc);
 
 -- =========================================================================
--- Voyages  (destination & ETA snapshots from ShipStaticData / msg 5)
--- A voyage represents a leg: current transit toward a destination.
+-- Destination history  (destination & ETA snapshots from ShipStaticData)
 -- =========================================================================
-CREATE TABLE IF NOT EXISTS voyages (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
-    destination     TEXT,
-    destination_port_id INTEGER REFERENCES ports(id),
-    eta             TEXT,              -- ISO-8601 datetime (combined from AIS ETA fields)
-    draught         REAL,             -- reported draught at departure (trade signal)
-    cargo_status    TEXT,             -- 'laden' / 'ballast' / NULL (inferred from draught)
-    reported_utc    TEXT NOT NULL      -- when we received this info
+CREATE TABLE IF NOT EXISTS destination_history (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
+    destination         TEXT,
+    estimated_arrival   TEXT,
+    timestamp_utc       TEXT    NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_voyage_mmsi   ON voyages(mmsi, reported_utc);
-CREATE INDEX IF NOT EXISTS idx_voyage_dest   ON voyages(destination);
+CREATE INDEX IF NOT EXISTS idx_dest_mmsi ON destination_history(mmsi, timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_dest_dest ON destination_history(destination);
 
 -- =========================================================================
--- Position reports  (the large time-series table)
+-- Draught history  (draught snapshots from ShipStaticData)
 -- =========================================================================
-CREATE TABLE IF NOT EXISTS position_reports (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
-    voyage_id       INTEGER REFERENCES voyages(id),  -- active voyage at time of report
-    timestamp_utc   TEXT    NOT NULL,          -- ISO-8601 with fractional seconds
-    latitude        REAL    NOT NULL,
-    longitude       REAL    NOT NULL,
-    sog             REAL,                      -- Speed over ground (knots)
-    cog             REAL,                      -- Course over ground (degrees)
-    true_heading    INTEGER,
-    nav_status      INTEGER,                   -- Navigational status code
-    rot             REAL,                      -- Rate of turn
-    message_id      INTEGER,                   -- AIS message ID (1/2/3/18/19…)
-    position_accuracy INTEGER,
-    raim            INTEGER
+CREATE TABLE IF NOT EXISTS draught_history (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
+    draught             REAL    NOT NULL,
+    timestamp_utc       TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_draught_mmsi ON draught_history(mmsi, timestamp_utc);
+
+-- =========================================================================
+-- Navigational-status history  (changes infrequently, ~3 times/month)
+-- Duplicates are acceptable; can be deduplicated later.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS navigational_status_history (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
+    navigational_status INTEGER NOT NULL,
+    timestamp_utc       TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_navstatus_mmsi ON navigational_status_history(mmsi, timestamp_utc);
+
+-- =========================================================================
+-- Position history  (the large time-series table)
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS position_history (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
+    timestamp_utc       TEXT    NOT NULL,
+    latitude            REAL    NOT NULL,
+    longitude           REAL    NOT NULL,
+    speed_over_ground   REAL,
+    course_over_ground  REAL,
+    true_heading        INTEGER,
+    rate_of_turn        REAL
 );
 
 -- Composite index for typical queries: "all positions for vessel X in time range"
-CREATE INDEX IF NOT EXISTS idx_pos_mmsi_ts   ON position_reports(mmsi, timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_pos_mmsi_ts   ON position_history(mmsi, timestamp_utc);
 -- Index for time-range scans across all vessels
-CREATE INDEX IF NOT EXISTS idx_pos_ts        ON position_reports(timestamp_utc);
--- Index for "all positions belonging to a voyage"
-CREATE INDEX IF NOT EXISTS idx_pos_voyage    ON position_reports(voyage_id);
+CREATE INDEX IF NOT EXISTS idx_pos_ts        ON position_history(timestamp_utc);
 
 -- =========================================================================
 -- R*Tree spatial index  (built-in SQLite, no extension needed)
--- Maps position_reports.id → bounding box (point = min==max)
+-- Maps position_history.id → bounding box (point = min==max)
 -- =========================================================================
-CREATE VIRTUAL TABLE IF NOT EXISTS position_reports_rtree USING rtree(
-    id,                     -- matches position_reports.id
-    min_lat, max_lat,       -- latitude  bounding box
-    min_lon, max_lon        -- longitude bounding box
+CREATE VIRTUAL TABLE IF NOT EXISTS position_history_rtree USING rtree(
+    id,
+    min_lat, max_lat,
+    min_lon, max_lon
 );
-
--- =========================================================================
--- View: current voyage & last known position per vessel  (convenience)
--- =========================================================================
-CREATE VIEW IF NOT EXISTS v_vessel_status AS
-SELECT
-    v.mmsi,
-    v.ship_name,
-    v.imo_number,
-    v.length_m,
-    v.beam_m,
-    st.label      AS ship_type_label,
-    st.category   AS ship_type_category,
-    lp.latitude   AS last_lat,
-    lp.longitude  AS last_lon,
-    lp.sog        AS last_sog,
-    lp.cog        AS last_cog,
-    lp.nav_status AS last_nav_status,
-    lp.timestamp_utc AS last_position_utc,
-    cv.destination,
-    cv.eta,
-    cv.cargo_status,
-    cv.id         AS current_voyage_id
-FROM vessels v
-LEFT JOIN ship_types st ON st.ship_type = v.ship_type
-LEFT JOIN (
-    SELECT mmsi, id, latitude, longitude, sog, cog, nav_status, timestamp_utc,
-           ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp_utc DESC) AS rn
-    FROM position_reports
-) lp ON lp.mmsi = v.mmsi AND lp.rn = 1
-LEFT JOIN (
-    SELECT mmsi, id, destination, eta, cargo_status,
-           ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY reported_utc DESC) AS rn
-    FROM voyages
-) cv ON cv.mmsi = v.mmsi AND cv.rn = 1;
 """
 
 # =========================================================================
@@ -217,6 +206,34 @@ SHIP_TYPE_SEED = [
     (94, "Other – Category D", "Other"),
     (99, "Other – No additional info", "Other"),
 ]
+
+# =========================================================================
+# Navigational-status seed data  (AIS nav-status codes → labels)
+# Reference: ITU-R M.1371-5, Table 45
+# =========================================================================
+NAV_STATUS_SEED = [
+    # (nav_status, label)
+    (0,  "Under way using engine"),
+    (1,  "At anchor"),
+    (2,  "Not under command"),
+    (3,  "Restricted manoeuvrability"),
+    (4,  "Constrained by her draught"),
+    (5,  "Moored"),
+    (6,  "Aground"),
+    (7,  "Engaged in fishing"),
+    (8,  "Under way sailing"),
+    (9,  "Reserved for HSC"),
+    (10, "Reserved for WIG"),
+    (11, "Power-driven vessel towing astern"),
+    (12, "Power-driven vessel pushing ahead or towing alongside"),
+    (13, "Reserved for future use"),
+    (14, "AIS-SART (active), MOB-AIS, EPIRB-AIS"),
+    (15, "Undefined / default"),
+]
+
+SEED_NAV_STATUSES_SQL = """
+INSERT OR IGNORE INTO nav_statuses (navigational_status, label) VALUES (?, ?);
+"""
 
 SEED_SHIP_TYPES_SQL = """
 INSERT OR IGNORE INTO ship_types (ship_type, label, category) VALUES (?, ?, ?);
