@@ -79,3 +79,42 @@ export interface LoadingStep {
   detail?: string;
   durationMs?: number;
 }
+
+export interface DbMetrics {
+  total_vessels: number;
+  total_positions: number;
+  total_destinations: number;
+  total_draughts: number;
+  total_nav_statuses: number;
+  total_ship_names: number;
+  vessels_by_type: Array<{
+    ship_type_label: string;
+    category: string;
+    ship_type_code: number | null;
+    vessel_count: number;
+  }>;
+  vessels_by_category: Array<{
+    category: string;
+    vessel_count: number;
+  }>;
+  time_range: {
+    ts_min: number;
+    ts_max: number;
+  } | null;
+  positions_per_day: Array<{
+    day: string;
+    cnt: number;
+  }>;
+  db_size_bytes: number;
+  table_sizes: Array<{
+    table: string;
+    row_count: number;
+  }>;
+  top_vessels: Array<{
+    mmsi: number;
+    ship_name: string | null;
+    ship_type_label: string;
+    category: string;
+    position_count: number;
+  }>;
+}

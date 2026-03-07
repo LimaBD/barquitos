@@ -1,4 +1,3 @@
-
 import type {
   TimeRange,
   CoverageBucket,
@@ -6,6 +5,7 @@ import type {
   TrackPoint,
   VesselDetail,
   SearchResult,
+  DbMetrics,
 } from './types';
 
 const BASE = '/api';
@@ -54,4 +54,8 @@ export function fetchVesselTrack(
 
 export function searchVessels(q: string): Promise<SearchResult[]> {
   return get(`${BASE}/search?q=${encodeURIComponent(q)}`);
+}
+
+export function fetchDbMetrics(): Promise<DbMetrics> {
+  return get(`${BASE}/db-metrics`);
 }
