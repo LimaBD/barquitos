@@ -10,7 +10,7 @@ Edit these values before running the collector.
 
 # Your API key from https://aisstream.io/authenticate
 # You can also set the environment variable AISSTREAM_API_KEY instead.
-API_KEY = "fef57ace7223b49c878ed116ee0dd0a95e562424"
+API_KEY = "831f2673b69d3426d33f41b455bd3f3ba9b1288f"
 
 # WebSocket endpoint
 WS_URL = "wss://stream.aisstream.io/v0/stream"
