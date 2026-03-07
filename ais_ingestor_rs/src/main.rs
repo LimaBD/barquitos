@@ -40,7 +40,7 @@ struct Args {
     #[arg(long = "backup-dir")]
     backup_dir: Option<String>,
 
-    /// Number of parser threads (0 = all CPUs).
+    /// Number of parser threads (0 = 70% of CPU cores).
     #[arg(long, default_value_t = 0)]
     threads: usize,
 }
@@ -53,9 +53,11 @@ fn main() {
 
     let args = Args::parse();
 
-    // Configure rayon thread pool
+    // Configure rayon thread pool — default to 70% of cores to leave
+    // headroom for the OS, database, and other services.
     let num_threads = if args.threads == 0 {
-        num_cpus::get()
+        let cores = num_cpus::get();
+        (cores as f64 * 0.70).ceil().max(1.0) as usize
     } else {
         args.threads
     };

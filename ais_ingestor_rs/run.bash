@@ -2,7 +2,7 @@
 # Launch the Rust AIS ingestor in watch mode (background).
 # Equivalent to the Python: nohup python3 ./ais_ingestor/ingest.py --watch
 #
-# Uses all CPU cores for parallel JSONL parsing by default.
+# Uses 70% of CPU cores for parallel JSONL parsing by default.
 # Override with: THREADS=4 ./run.bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
