@@ -1,0 +1,32 @@
+[package]
+name = "ais_ingestor"
+version = "0.1.0"
+edition = "2021"
+description = "AIS JSONL → SQLite ingestion tool (Rust port)"
+
+[dependencies]
+# JSON parsing
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SQLite
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Glob pattern matching
+glob = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
