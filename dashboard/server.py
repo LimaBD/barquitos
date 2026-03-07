@@ -290,9 +290,131 @@ async def stats():
     }
 
 
-# ── Serve built Vite assets (JS, CSS) — must be AFTER all API routes ───────
+@app.get("/api/db-metrics")
+async def db_metrics():
+    """Comprehensive database metrics for the DB Metrics page."""
+    conn = _get_conn()
+
+    # ── Counts ─────────────────────────────────────────────────────────
+    total_vessels = conn.execute("SELECT total_vessels FROM v_total_vessels").fetchone()[0]
+    total_positions = conn.execute("SELECT total_positions FROM v_total_positions").fetchone()[0]
+
+    total_destinations = conn.execute("SELECT COUNT(*) FROM destination_history").fetchone()[0]
+    total_draughts = conn.execute("SELECT COUNT(*) FROM draught_history").fetchone()[0]
+    total_nav_statuses = conn.execute("SELECT COUNT(*) FROM navigational_status_history").fetchone()[0]
+    total_ship_names = conn.execute("SELECT COUNT(*) FROM ship_name_history").fetchone()[0]
+
+    # ── Vessels by type ────────────────────────────────────────────────
+    vessels_by_type = _rows_to_dicts(conn.execute(
+        "SELECT * FROM v_vessels_by_type"
+    ))
+
+    # ── Vessels by category ────────────────────────────────────────────
+    vessels_by_category = _rows_to_dicts(conn.execute(
+        """
+        SELECT
+            COALESCE(st.category, 'Unknown') AS category,
+            COUNT(*) AS vessel_count
+        FROM vessels v
+        LEFT JOIN ship_types st ON v.ship_type = st.ship_type
+        GROUP BY category
+        ORDER BY vessel_count DESC
+        """
+    ))
+
+    # ── Time range ─────────────────────────────────────────────────────
+    time_range_row = conn.execute(
+        "SELECT MIN(timestamp_utc) AS ts_min, MAX(timestamp_utc) AS ts_max "
+        "FROM position_history"
+    ).fetchone()
+    time_range = {
+        "ts_min": time_range_row["ts_min"],
+        "ts_max": time_range_row["ts_max"],
+    } if time_range_row and time_range_row["ts_min"] else None
+
+    # ── Positions per day (last 30 days) ───────────────────────────────
+    positions_per_day = _rows_to_dicts(conn.execute(
+        """
+        SELECT
+            DATE(timestamp_utc, 'unixepoch') AS day,
+            COUNT(*) AS cnt
+        FROM position_history
+        GROUP BY day
+        ORDER BY day DESC
+        LIMIT 30
+        """
+    ))
+
+    # ── Database file size ─────────────────────────────────────────────
+    db_size_bytes = 0
+    try:
+        db_size_bytes = os.path.getsize(DATABASE_PATH)
+    except OSError:
+        pass
+
+    # ── Table sizes (page counts from SQLite internals) ────────────────
+    table_sizes = []
+    for tbl_name in [
+        "vessels", "position_history", "destination_history",
+        "draught_history", "navigational_status_history", "ship_name_history",
+        "ship_types", "nav_statuses",
+    ]:
+        try:
+            row_count = conn.execute(f"SELECT COUNT(*) FROM [{tbl_name}]").fetchone()[0]
+            table_sizes.append({"table": tbl_name, "row_count": row_count})
+        except Exception:
+            pass
+
+    # ── Top 10 vessels with most position reports ──────────────────────
+    top_vessels = _rows_to_dicts(conn.execute(
+        """
+        SELECT
+            ph.mmsi,
+            v.ship_name,
+            COALESCE(st.label, 'Unknown') AS ship_type_label,
+            COALESCE(st.category, 'Unknown') AS category,
+            COUNT(*) AS position_count
+        FROM position_history ph
+        JOIN vessels v ON ph.mmsi = v.mmsi
+        LEFT JOIN ship_types st ON v.ship_type = st.ship_type
+        GROUP BY ph.mmsi
+        ORDER BY position_count DESC
+        LIMIT 10
+        """
+    ))
+
+    return {
+        "total_vessels": total_vessels,
+        "total_positions": total_positions,
+        "total_destinations": total_destinations,
+        "total_draughts": total_draughts,
+        "total_nav_statuses": total_nav_statuses,
+        "total_ship_names": total_ship_names,
+        "vessels_by_type": vessels_by_type,
+        "vessels_by_category": vessels_by_category,
+        "time_range": time_range,
+        "positions_per_day": positions_per_day,
+        "db_size_bytes": db_size_bytes,
+        "table_sizes": table_sizes,
+        "top_vessels": top_vessels,
+    }
+
+
+# ── Serve built Vite assets (JS, CSS) — must be BEFORE the SPA catch-all ───
 # Vite outputs assets to static/assets/; this mount makes /assets/* work.
 app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
+
+
+# ── SPA catch-all: serve index.html for all non-API paths (client-side routing) ──
+@app.get("/{path:path}")
+async def spa_catch_all(path: str):
+    """Serve index.html for any non-API path to support client-side routing."""
+    if path.startswith("api/"):
+        raise HTTPException(404)
+    html_file = STATIC_DIR / "index.html"
+    if html_file.exists():
+        return HTMLResponse(html_file.read_text())
+    raise HTTPException(404)
 
 
 # ── main ───────────────────────────────────────────────────────────────────
