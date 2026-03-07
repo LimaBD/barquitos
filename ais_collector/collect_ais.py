@@ -142,9 +142,10 @@ async def _collect(api_key: str, writer: RotatingFileWriter):
 
     async with websockets.connect(
         config.WS_URL,
+        open_timeout=60,
         ping_interval=60,
         ping_timeout=60,
-        close_timeout=60,
+        close_timeout=10,
         max_size=2**22,  # 4 MB max message size
     ) as ws:
         logger.info("Connected. Sending subscription …")
