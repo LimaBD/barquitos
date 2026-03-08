@@ -7,6 +7,7 @@
 ///      single large transaction (SQLite is single-writer anyway).
 ///   4. Within each file, lines are parsed in parallel chunks using rayon.
 ///
+/// No deduplication is done here — a separate cronjob handles that.
 /// This gives near-linear speedup on multi-core machines because parsing
 /// and JSON deserialization dominate the runtime.
 
@@ -437,6 +438,7 @@ ON CONFLICT(bucket_start) DO UPDATE SET
 
 /// Parse a single JSONL file into memory. This is the hot loop that runs
 /// on rayon worker threads. It does NO database I/O.
+/// No deduplication — just extract all rows as fast as possible.
 fn parse_file(
     filepath: &Path,
     non_commercial_mmsis: &HashSet<i64>,
@@ -486,13 +488,6 @@ fn parse_file(
             let mut skipped_non_commercial: u64 = 0;
             let mut new_non_commercial: HashSet<i64> = HashSet::new();
 
-            // Ingest-time dedup tracking: last known values per mmsi
-            let mut last_draught: HashMap<i64, i64> = HashMap::new(); // mmsi → draught bits
-            let mut last_nav_status: HashMap<i64, i64> = HashMap::new(); // mmsi → nav status
-            let mut last_ship_name: HashMap<i64, String> = HashMap::new(); // mmsi → name
-            let mut last_position_ts: HashMap<i64, i64> = HashMap::new(); // mmsi → last ts
-            let mut last_destination: HashMap<i64, (Option<String>, Option<i64>)> = HashMap::new(); // mmsi → (dest, eta)
-
             for line in chunk {
                 let record: AisRecord = match serde_json::from_str(line) {
                     Ok(r) => r,
@@ -525,36 +520,18 @@ fn parse_file(
                                 skipped_non_commercial += 1;
                                 continue;
                             }
-                            // Count this message in the appropriate 60s bucket
                             let bucket = (vs.seen_utc / 60) * 60;
                             *message_counts.entry(bucket).or_insert(0) += 1;
                             vessels_static.push(vs);
                         }
                         if let Some(dest) = extract_destination(msg, meta) {
-                            // Ingest-time dedup: only keep if destination or ETA changed
-                            let key = (dest.destination.clone(), dest.estimated_arrival);
-                            let dominated = last_destination.get(&mmsi).map_or(false, |prev| *prev == key);
-                            if !dominated {
-                                last_destination.insert(mmsi, key);
-                                destinations.push(dest);
-                            }
+                            destinations.push(dest);
                         }
                         if let Some(dr) = extract_draught(msg, meta) {
-                            // Ingest-time dedup: only keep if draught changed
-                            let draught_bits = dr.draught.to_bits() as i64;
-                            let dominated = last_draught.get(&mmsi).map_or(false, |&prev| prev == draught_bits);
-                            if !dominated {
-                                last_draught.insert(mmsi, draught_bits);
-                                draughts.push(dr);
-                            }
+                            draughts.push(dr);
                         }
                         if let Some(sn) = extract_ship_name(msg, meta) {
-                            // Ingest-time dedup: only keep if name changed
-                            let dominated = last_ship_name.get(&mmsi).map_or(false, |prev| *prev == sn.ship_name);
-                            if !dominated {
-                                last_ship_name.insert(mmsi, sn.ship_name.clone());
-                                ship_names.push(sn);
-                            }
+                            ship_names.push(sn);
                         }
                     }
 
@@ -563,17 +540,9 @@ fn parse_file(
                     | "ExtendedClassBPositionReport"
                     | "StandardSearchAndRescueAircraftReport" => {
                         if let Some(pos) = extract_position(msg, meta) {
-                            // Ingest-time dedup: skip if same vessel reported within last 5s
-                            let dominated = last_position_ts.get(&mmsi).map_or(false, |&prev_ts| {
-                                (pos.timestamp_utc - prev_ts).abs() < 5
-                            });
-                            if !dominated {
-                                last_position_ts.insert(mmsi, pos.timestamp_utc);
-                                // Count this message in the appropriate 60s bucket
-                                let bucket = (pos.timestamp_utc / 60) * 60;
-                                *message_counts.entry(bucket).or_insert(0) += 1;
-                                positions.push(pos);
-                            }
+                            let bucket = (pos.timestamp_utc / 60) * 60;
+                            *message_counts.entry(bucket).or_insert(0) += 1;
+                            positions.push(pos);
                             let ship_name = meta
                                 .ship_name
                                 .as_deref()
@@ -591,12 +560,7 @@ fn parse_file(
                             );
                         }
                         if let Some(ns) = extract_nav_status(msg, meta) {
-                            // Ingest-time dedup: only keep if status changed
-                            let dominated = last_nav_status.get(&mmsi).map_or(false, |&prev| prev == ns.navigational_status);
-                            if !dominated {
-                                last_nav_status.insert(mmsi, ns.navigational_status);
-                                nav_statuses.push(ns);
-                            }
+                            nav_statuses.push(ns);
                         }
                     }
 
@@ -661,13 +625,11 @@ fn parse_file(
     for part in partial_results {
         merged.positions.extend(part.positions);
         merged.vessels_static.extend(part.vessels_static);
-        // For minimal vessels, later entries win (same as original logic)
         merged.vessels_minimal.extend(part.vessels_minimal);
         merged.destinations.extend(part.destinations);
         merged.draughts.extend(part.draughts);
         merged.nav_statuses.extend(part.nav_statuses);
         merged.ship_names.extend(part.ship_names);
-        // Merge message counts (sum across chunks)
         for (bucket, count) in part.message_counts {
             *merged.message_counts.entry(bucket).or_insert(0) += count;
         }
@@ -690,6 +652,7 @@ fn parse_file(
 
 // =========================================================================
 // Batch DB writer — single-threaded, writes all parsed data
+// No deduplication — just blind inserts for maximum speed.
 // =========================================================================
 
 fn write_parsed_to_db(
@@ -698,20 +661,14 @@ fn write_parsed_to_db(
 ) -> Result<(), rusqlite::Error> {
     let tx = conn.transaction()?;
 
-    // 1) Vessel upserts
     insert_vessels_static(&tx, &parsed.vessels_static)?;
     insert_vessels_minimal(&tx, &parsed.vessels_minimal)?;
-
-    // 2) History tables
     insert_destinations(&tx, &parsed.destinations)?;
     insert_draughts(&tx, &parsed.draughts)?;
     insert_nav_statuses(&tx, &parsed.nav_statuses)?;
     insert_ship_names(&tx, &parsed.ship_names)?;
-
-    // 2b) AIS message counts
     insert_message_counts(&tx, &parsed.message_counts)?;
 
-    // 3) Positions + R*Tree
     let max_id_before: i64 = tx.query_row(
         "SELECT COALESCE(MAX(id), 0) FROM position_history",
         [],
@@ -745,7 +702,7 @@ fn write_parsed_to_db(
 }
 
 /// Write multiple parsed files in a single mega-transaction for maximum
-/// throughput (fewer fsync calls).
+/// throughput (fewer fsync calls). No deduplication.
 fn write_all_to_db(
     conn: &mut Connection,
     parsed_files: &[ParsedFile],
@@ -760,6 +717,8 @@ fn write_all_to_db(
     let mut total_static = 0usize;
     let mut total_minimal = 0usize;
 
+    let t0 = Instant::now();
+
     // 1) Vessel upserts for all files
     for pf in parsed_files {
         insert_vessels_static(&tx, &pf.vessels_static)?;
@@ -768,7 +727,10 @@ fn write_all_to_db(
         total_minimal += pf.vessels_minimal.len();
     }
 
-    // 2) History tables for all files
+    let t1 = Instant::now();
+    info!("    ⏱  Vessel upserts: {:.2}s", (t1 - t0).as_secs_f64());
+
+    // 2) History tables for all files (blind inserts, no dedup)
     for pf in parsed_files {
         insert_destinations(&tx, &pf.destinations)?;
         insert_draughts(&tx, &pf.draughts)?;
@@ -780,6 +742,9 @@ fn write_all_to_db(
         total_nav += pf.nav_statuses.len();
         total_names += pf.ship_names.len();
     }
+
+    let t2 = Instant::now();
+    info!("    ⏱  History tables: {:.2}s", (t2 - t1).as_secs_f64());
 
     // 3) Positions + R*Tree for all files
     let max_id_before: i64 = tx.query_row(
@@ -793,6 +758,9 @@ fn write_all_to_db(
         total_pos += pf.positions.len();
     }
 
+    let t3 = Instant::now();
+    info!("    ⏱  Positions insert: {:.2}s", (t3 - t2).as_secs_f64());
+
     tx.execute(
         "INSERT INTO position_history_rtree (id, min_lat, max_lat, min_lon, max_lon)
          SELECT id, latitude, latitude, longitude, longitude
@@ -800,12 +768,19 @@ fn write_all_to_db(
         params![max_id_before],
     )?;
 
+    let t4 = Instant::now();
+    info!("    ⏱  R*Tree update: {:.2}s", (t4 - t3).as_secs_f64());
+
     tx.commit()?;
 
+    let t5 = Instant::now();
+    info!("    ⏱  Commit (fsync): {:.2}s", (t5 - t4).as_secs_f64());
+
     info!(
-        "  ✅  BATCH COMMIT: {} files → {} pos, {} dest, {} dr, {} nav, {} names, {} static, {} minimal",
+        "  ✅  BATCH COMMIT: {} files → {} pos, {} dest, {} dr, {} nav, {} names, {} static, {} minimal in {:.2}s",
         parsed_files.len(),
         total_pos, total_dest, total_dr, total_nav, total_names, total_static, total_minimal,
+        (t5 - t0).as_secs_f64(),
     );
 
     Ok(())
@@ -876,33 +851,8 @@ fn insert_destinations(tx: &Transaction, rows: &[DestinationRow]) -> Result<(), 
     if rows.is_empty() {
         return Ok(());
     }
-    // DB-level dedup: load last known (destination, eta) per mmsi so we
-    // skip rows that repeat the same value across file boundaries.
-    let mut last: HashMap<i64, (String, i64)> = HashMap::new();
-    {
-        let mut q = tx.prepare_cached(
-            "SELECT mmsi, COALESCE(destination,''), COALESCE(estimated_arrival,0) \
-             FROM destination_history \
-             WHERE id IN (SELECT MAX(id) FROM destination_history GROUP BY mmsi)"
-        )?;
-        let mut qrows = q.query([])?;
-        while let Some(r) = qrows.next()? {
-            let mmsi: i64 = r.get(0)?;
-            let dest: String = r.get(1)?;
-            let eta: i64 = r.get(2)?;
-            last.insert(mmsi, (dest, eta));
-        }
-    }
     let mut stmt = tx.prepare_cached(DESTINATION_INSERT)?;
     for r in rows {
-        let key = (
-            r.destination.clone().unwrap_or_default(),
-            r.estimated_arrival.unwrap_or(0),
-        );
-        if last.get(&r.mmsi).map_or(false, |prev| *prev == key) {
-            continue;
-        }
-        last.insert(r.mmsi, key);
         stmt.execute(params![r.mmsi, r.destination, r.estimated_arrival, r.timestamp_utc])?;
     }
     Ok(())
@@ -912,27 +862,8 @@ fn insert_draughts(tx: &Transaction, rows: &[DraughtRow]) -> Result<(), rusqlite
     if rows.is_empty() {
         return Ok(());
     }
-    // DB-level dedup: load last known draught per mmsi
-    let mut last: HashMap<i64, i64> = HashMap::new();
-    {
-        let mut q = tx.prepare_cached(
-            "SELECT mmsi, draught FROM draught_history \
-             WHERE id IN (SELECT MAX(id) FROM draught_history GROUP BY mmsi)"
-        )?;
-        let mut qrows = q.query([])?;
-        while let Some(r) = qrows.next()? {
-            let mmsi: i64 = r.get(0)?;
-            let d: f64 = r.get(1)?;
-            last.insert(mmsi, d.to_bits() as i64);
-        }
-    }
     let mut stmt = tx.prepare_cached(DRAUGHT_INSERT)?;
     for r in rows {
-        let bits = r.draught.to_bits() as i64;
-        if last.get(&r.mmsi).map_or(false, |&prev| prev == bits) {
-            continue;
-        }
-        last.insert(r.mmsi, bits);
         stmt.execute(params![r.mmsi, r.draught, r.timestamp_utc])?;
     }
     Ok(())
@@ -942,26 +873,8 @@ fn insert_nav_statuses(tx: &Transaction, rows: &[NavStatusRow]) -> Result<(), ru
     if rows.is_empty() {
         return Ok(());
     }
-    // DB-level dedup: load last known nav status per mmsi
-    let mut last: HashMap<i64, i64> = HashMap::new();
-    {
-        let mut q = tx.prepare_cached(
-            "SELECT mmsi, navigational_status FROM navigational_status_history \
-             WHERE id IN (SELECT MAX(id) FROM navigational_status_history GROUP BY mmsi)"
-        )?;
-        let mut qrows = q.query([])?;
-        while let Some(r) = qrows.next()? {
-            let mmsi: i64 = r.get(0)?;
-            let ns: i64 = r.get(1)?;
-            last.insert(mmsi, ns);
-        }
-    }
     let mut stmt = tx.prepare_cached(NAV_STATUS_INSERT)?;
     for r in rows {
-        if last.get(&r.mmsi).map_or(false, |&prev| prev == r.navigational_status) {
-            continue;
-        }
-        last.insert(r.mmsi, r.navigational_status);
         stmt.execute(params![r.mmsi, r.navigational_status, r.timestamp_utc])?;
     }
     Ok(())
@@ -971,26 +884,8 @@ fn insert_ship_names(tx: &Transaction, rows: &[ShipNameRow]) -> Result<(), rusql
     if rows.is_empty() {
         return Ok(());
     }
-    // DB-level dedup: load last known ship name per mmsi
-    let mut last: HashMap<i64, String> = HashMap::new();
-    {
-        let mut q = tx.prepare_cached(
-            "SELECT mmsi, ship_name FROM ship_name_history \
-             WHERE id IN (SELECT MAX(id) FROM ship_name_history GROUP BY mmsi)"
-        )?;
-        let mut qrows = q.query([])?;
-        while let Some(r) = qrows.next()? {
-            let mmsi: i64 = r.get(0)?;
-            let name: String = r.get(1)?;
-            last.insert(mmsi, name);
-        }
-    }
     let mut stmt = tx.prepare_cached(SHIP_NAME_INSERT)?;
     for r in rows {
-        if last.get(&r.mmsi).map_or(false, |prev| *prev == r.ship_name) {
-            continue;
-        }
-        last.insert(r.mmsi, r.ship_name.clone());
         stmt.execute(params![r.mmsi, r.ship_name, r.timestamp_utc])?;
     }
     Ok(())
@@ -1051,7 +946,7 @@ pub fn move_to_backup(filepath: &Path, backup_dir: &Path) {
 ///   1. Discover JSONL files
 ///   2. Process them in batches of FILES_PER_BATCH:
 ///      a. Parse batch in parallel (rayon)  — CPU-bound
-///      b. Write batch to SQLite            — IO-bound
+///      b. Write batch to SQLite            — IO-bound (blind inserts, no dedup)
 ///      c. Move processed files to backup   — immediate feedback
 ///   3. Repeat until all files are done
 ///
@@ -1128,6 +1023,7 @@ pub fn run_once_parallel(
         let batch_pos: usize = parsed_files.iter().map(|pf| pf.positions.len()).sum();
 
         // ── Phase 2: Write this batch to SQLite ──────────────────────
+        let t_write = Instant::now();
         match write_all_to_db(conn, &parsed_files) {
             Ok(()) => {
                 for pf in &parsed_files {
@@ -1151,6 +1047,12 @@ pub fn run_once_parallel(
                 }
             }
         }
+
+        let write_elapsed = t_write.elapsed();
+        info!(
+            "    ⏱  Total DB write + move: {:.2}s",
+            write_elapsed.as_secs_f64(),
+        );
 
         total_pos += batch_pos;
         total_lines_all += batch_lines;
