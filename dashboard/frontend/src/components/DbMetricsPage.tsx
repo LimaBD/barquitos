@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { fetchDbMetrics } from '../api';
-import type { DbMetrics } from '../types';
+import type { DbMetrics, LoadingStep } from '../types';
+import LoadingScreen from './LoadingScreen';
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
@@ -27,14 +28,53 @@ export default function DbMetricsPage() {
   const [metrics, setMetrics] = useState<DbMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadingSteps, setLoadingSteps] = useState<LoadingStep[]>([
+    { label: 'Connecting to server', status: 'pending' },
+    { label: 'Querying database metrics', status: 'pending', detail: 'Counting vessels, positions, tables…' },
+    { label: 'Rendering dashboard', status: 'pending' },
+  ]);
 
   useEffect(() => {
+    const updateStep = (index: number, patch: Partial<LoadingStep>) => {
+      setLoadingSteps(prev => prev.map((s, i) => i === index ? { ...s, ...patch } : s));
+    };
+
     (async () => {
+      const t0 = performance.now();
+
+      // Step 0: Connecting
+      updateStep(0, { status: 'running' });
       try {
+        updateStep(0, { status: 'done', durationMs: Math.round(performance.now() - t0) });
+
+        // Step 1: Query metrics
+        const t1 = performance.now();
+        updateStep(1, { status: 'running' });
         const data = await fetchDbMetrics();
         setMetrics(data);
+        updateStep(1, {
+          status: 'done',
+          durationMs: Math.round(performance.now() - t1),
+          detail: `${data.total_vessels.toLocaleString()} vessels · ${data.total_positions.toLocaleString()} positions`,
+        });
+
+        // Step 2: Rendering
+        const t2 = performance.now();
+        updateStep(2, { status: 'running' });
+        await new Promise(r => setTimeout(r, 100));
+        updateStep(2, {
+          status: 'done',
+          durationMs: Math.round(performance.now() - t2),
+          detail: `Total: ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+        });
+
+        await new Promise(r => setTimeout(r, 500));
       } catch (err) {
         setError(String(err));
+        setLoadingSteps(prev => prev.map(s =>
+          s.status === 'running' ? { ...s, status: 'error', detail: String(err) } : s
+        ));
+        await new Promise(r => setTimeout(r, 3000));
       } finally {
         setLoading(false);
       }
@@ -44,10 +84,7 @@ export default function DbMetricsPage() {
   if (loading) {
     return (
       <div className="metrics-page">
-        <div className="metrics-loading">
-          <div className="metrics-spinner" />
-          <p>Loading database metrics…</p>
-        </div>
+        <LoadingScreen steps={loadingSteps} />
       </div>
     );
   }

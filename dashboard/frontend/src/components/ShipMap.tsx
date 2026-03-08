@@ -10,9 +10,10 @@ interface Props {
   selectedMmsi: number | null;
   vesselTrack: TrackPoint[];
   onSelectVessel: (mmsi: number) => void;
+  onBoundsChange?: (bounds: { minLat: number; maxLat: number; minLon: number; maxLon: number }) => void;
 }
 
-export default function ShipMap({ positions, selectedMmsi, vesselTrack, onSelectVessel }: Props) {
+export default function ShipMap({ positions, selectedMmsi, vesselTrack, onSelectVessel, onBoundsChange }: Props) {
   const mapRef = useRef<L.Map | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const markersRef = useRef<L.LayerGroup>(L.layerGroup());
@@ -50,6 +51,32 @@ export default function ShipMap({ positions, selectedMmsi, vesselTrack, onSelect
       mapRef.current = null;
     };
   }, []);
+
+  // ── Report bounds changes to parent ──────────────────────────────
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !onBoundsChange) return;
+
+    const reportBounds = () => {
+      const b = map.getBounds();
+      onBoundsChange({
+        minLat: b.getSouth(),
+        maxLat: b.getNorth(),
+        minLon: b.getWest(),
+        maxLon: b.getEast(),
+      });
+    };
+
+    map.on('moveend', reportBounds);
+    map.on('zoomend', reportBounds);
+    // Report initial bounds
+    reportBounds();
+
+    return () => {
+      map.off('moveend', reportBounds);
+      map.off('zoomend', reportBounds);
+    };
+  }, [onBoundsChange]);
 
   // ── Remove CSS filter since we use a dark tile layer ─────────────
   // The CSS .leaflet-tile-pane filter is a fallback; CartoDB dark tiles

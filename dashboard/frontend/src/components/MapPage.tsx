@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   fetchTimeRange,
   fetchCoverage,
@@ -27,6 +27,10 @@ type Mode = 'realtime' | 'playback';
 
 export default function MapPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  // Read category filters from URL
+  const selectedCategories = searchParams.get('categories')?.split(',').filter(Boolean) ?? [];
 
   // ── global state ─────────────────────────────────────────────────
   const [mode, setMode] = useState<Mode>('realtime');
@@ -34,8 +38,8 @@ export default function MapPage() {
   const [loadingSteps, setLoadingSteps] = useState<LoadingStep[]>([
     { label: 'Connecting to server', status: 'pending' },
     { label: 'Loading time range', status: 'pending' },
-    { label: 'Loading timeline coverage', status: 'pending', detail: 'Scanning 5M+ position reports…' },
-    { label: 'Loading vessel positions', status: 'pending', detail: 'Finding latest position for every vessel…' },
+    { label: 'Loading timeline coverage', status: 'pending', detail: 'Scanning position reports…' },
+    { label: 'Loading vessel positions', status: 'pending', detail: `Filtered: ${selectedCategories.join(', ') || 'all'} (max 1,000)` },
     { label: 'Rendering map', status: 'pending' },
   ]);
 
@@ -62,6 +66,10 @@ export default function MapPage() {
   // total counts
   const [totalVessels, setTotalVessels] = useState(0);
 
+  // Map bounds for viewport-based refresh
+  const mapBoundsRef = useRef<{ minLat: number; maxLat: number; minLon: number; maxLon: number } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
   // Refs for playback interval
   const playRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const currentTsRef = useRef(currentTs);
@@ -71,6 +79,19 @@ export default function MapPage() {
   useEffect(() => { currentTsRef.current = currentTs; }, [currentTs]);
   useEffect(() => { speedRef.current = speed; }, [speed]);
   useEffect(() => { timeRangeRef.current = timeRange; }, [timeRange]);
+
+  // ── helpers ──────────────────────────────────────────────────────
+  const loadLatestWithFilters = useCallback(async (bounds?: { minLat: number; maxLat: number; minLon: number; maxLon: number }) => {
+    const pos = await fetchLatestPositions({
+      categories: selectedCategories.length > 0 ? selectedCategories : undefined,
+      bounds: bounds ?? undefined,
+      limit: 1000,
+    });
+    setPositions(pos);
+    setTotalVessels(pos.length);
+    return pos;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategories.join(',')]);
 
   // ── init ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -109,12 +130,10 @@ export default function MapPage() {
           detail: `${cov.length.toLocaleString()} time buckets loaded`,
         });
 
-        // Step 3: Positions
+        // Step 3: Positions (filtered, max 1000)
         const t3 = performance.now();
         updateStep(3, { status: 'running' });
-        const pos = await fetchLatestPositions();
-        setPositions(pos);
-        setTotalVessels(pos.length);
+        const pos = await loadLatestWithFilters();
         updateStep(3, {
           status: 'done',
           durationMs: Math.round(performance.now() - t3),
@@ -124,7 +143,6 @@ export default function MapPage() {
         // Step 4: Rendering
         const t4 = performance.now();
         updateStep(4, { status: 'running' });
-        // Give React a frame to render the markers
         await new Promise(r => setTimeout(r, 100));
         updateStep(4, {
           status: 'done',
@@ -132,20 +150,35 @@ export default function MapPage() {
           detail: `Total: ${((performance.now() - t0) / 1000).toFixed(1)}s`,
         });
 
-        // Small delay so user can see the final state
         await new Promise(r => setTimeout(r, 600));
       } catch (err) {
         console.error('Init error:', err);
-        // Mark whatever step is running as error
         setLoadingSteps(prev => prev.map(s =>
           s.status === 'running' ? { ...s, status: 'error', detail: String(err) } : s
         ));
-        // Still dismiss after a delay so user can see the error
         await new Promise(r => setTimeout(r, 3000));
       } finally {
         setLoading(false);
       }
     })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Refresh positions for current viewport ───────────────────────
+  const handleRefreshViewport = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await loadLatestWithFilters(mapBoundsRef.current ?? undefined);
+    } catch (err) {
+      console.error('Refresh error:', err);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [loadLatestWithFilters]);
+
+  // ── Map bounds changed callback ──────────────────────────────────
+  const handleBoundsChange = useCallback((bounds: { minLat: number; maxLat: number; minLon: number; maxLon: number }) => {
+    mapBoundsRef.current = bounds;
   }, []);
 
   // ── mode switch ──────────────────────────────────────────────────
@@ -156,14 +189,12 @@ export default function MapPage() {
     setVesselDetail(null);
     setVesselTrack([]);
     try {
-      const pos = await fetchLatestPositions();
-      setPositions(pos);
-      setTotalVessels(pos.length);
+      await loadLatestWithFilters(mapBoundsRef.current ?? undefined);
       if (timeRange) setCurrentTs(timeRange.ts_max);
     } catch (err) {
       console.error(err);
     }
-  }, [timeRange]);
+  }, [timeRange, loadLatestWithFilters]);
 
   const switchToPlayback = useCallback(() => {
     setMode('playback');
@@ -185,7 +216,6 @@ export default function MapPage() {
   const lastFetchTs = useRef(0);
   useEffect(() => {
     if (mode !== 'playback') return;
-    // Throttle: only fetch when ts moved by >10s since last fetch
     if (Math.abs(currentTs - lastFetchTs.current) < 10) return;
     lastFetchTs.current = currentTs;
     loadPositionsAt(currentTs);
@@ -205,7 +235,7 @@ export default function MapPage() {
           }
           return next;
         });
-      }, 100); // tick every 100ms
+      }, 100);
     }
     return () => {
       if (playRef.current) clearInterval(playRef.current);
@@ -317,10 +347,28 @@ export default function MapPage() {
             selectedMmsi={selectedMmsi}
             vesselTrack={vesselTrack}
             onSelectVessel={selectVessel}
+            onBoundsChange={handleBoundsChange}
           />
           <div className="vessel-count-badge">
             <span className="count">{totalVessels}</span> vessels
           </div>
+          {/* Refresh viewport button */}
+          <button
+            className="refresh-viewport-btn"
+            onClick={handleRefreshViewport}
+            disabled={refreshing}
+            title="Refresh vessels in current view"
+          >
+            {refreshing ? '⟳ Loading…' : '⟳ Refresh View'}
+          </button>
+          {/* Back to type selector */}
+          <button
+            className="change-types-btn"
+            onClick={() => navigate('/select-types')}
+            title="Change ship type filters"
+          >
+            🔧 Filters
+          </button>
         </div>
 
         {selectedMmsi && vesselDetail && (

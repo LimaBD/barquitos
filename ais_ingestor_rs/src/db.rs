@@ -86,6 +86,31 @@ CREATE TABLE IF NOT EXISTS position_history (
 CREATE INDEX IF NOT EXISTS idx_pos_mmsi_ts ON position_history(mmsi, timestamp_utc);
 CREATE INDEX IF NOT EXISTS idx_pos_ts      ON position_history(timestamp_utc);
 
+CREATE TABLE IF NOT EXISTS ais_message_counts (
+    bucket_start    INTEGER PRIMARY KEY,
+    message_count   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ais_msg_bucket ON ais_message_counts(bucket_start);
+
+CREATE TABLE IF NOT EXISTS vessel_details (
+    mmsi                INTEGER PRIMARY KEY REFERENCES vessels(mmsi),
+    gross_tonnage       REAL,
+    net_tonnage         REAL,
+    deadweight_tonnage  REAL,
+    year_built          INTEGER,
+    flag_country        TEXT,
+    flag_code           TEXT,
+    class_society       TEXT,
+    registered_owner    TEXT,
+    operator            TEXT,
+    vessel_category     TEXT,
+    hull_type           TEXT,
+    engine_type         TEXT,
+    max_speed_knots     REAL,
+    source              TEXT,
+    enriched_at         INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS position_history_rtree USING rtree(
     id,
     min_lat, max_lat,

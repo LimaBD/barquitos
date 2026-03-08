@@ -269,10 +269,111 @@ async def search_vessels(q: str = Query(..., min_length=1)):
 
 
 @app.get("/api/latest-positions")
-async def latest_positions():
-    """Return the most recent known position of every vessel (v_latest_positions view)."""
+async def latest_positions(
+    ship_types: str | None = Query(None, description="Comma-separated ship type codes"),
+    categories: str | None = Query(None, description="Comma-separated categories"),
+    min_lat: float | None = Query(None),
+    max_lat: float | None = Query(None),
+    min_lon: float | None = Query(None),
+    max_lon: float | None = Query(None),
+    limit: int = Query(1000, ge=1, le=5000),
+):
+    """
+    Return the most recent known position of vessels, with optional filters.
+    Supports bounding-box viewport filtering and ship-type/category filtering.
+    Returns at most `limit` random vessels from the filtered set.
+    """
     conn = _get_conn()
-    rows = _rows_to_dicts(conn.execute("SELECT * FROM v_latest_positions"))
+
+    where_clauses = []
+    params: dict = {}
+
+    # Ship type filter
+    if ship_types:
+        type_list = [int(t.strip()) for t in ship_types.split(",") if t.strip().isdigit()]
+        if type_list:
+            placeholders = ",".join(f":st{i}" for i in range(len(type_list)))
+            where_clauses.append(f"v.ship_type IN ({placeholders})")
+            for i, st in enumerate(type_list):
+                params[f"st{i}"] = st
+
+    # Category filter
+    if categories:
+        cat_list = [c.strip() for c in categories.split(",") if c.strip()]
+        if cat_list:
+            placeholders = ",".join(f":cat{i}" for i in range(len(cat_list)))
+            where_clauses.append(f"COALESCE(stype.category, 'Unknown') IN ({placeholders})")
+            for i, cat in enumerate(cat_list):
+                params[f"cat{i}"] = cat
+
+    # Bounding box filter
+    if all(v is not None for v in [min_lat, max_lat, min_lon, max_lon]):
+        where_clauses.append(
+            "ph.latitude BETWEEN :min_lat AND :max_lat "
+            "AND ph.longitude BETWEEN :min_lon AND :max_lon"
+        )
+        params["min_lat"] = min_lat
+        params["max_lat"] = max_lat
+        params["min_lon"] = min_lon
+        params["max_lon"] = max_lon
+
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    params["lim"] = limit
+
+    sql = f"""
+    SELECT
+        ph.mmsi,
+        v.ship_name,
+        v.ship_type,
+        COALESCE(stype.label, 'Unknown') AS ship_type_label,
+        COALESCE(stype.category, 'Unknown') AS category,
+        ph.timestamp_utc,
+        ph.latitude,
+        ph.longitude,
+        ph.speed_over_ground,
+        ph.course_over_ground,
+        ph.true_heading
+    FROM position_history ph
+    INNER JOIN (
+        SELECT mmsi, MAX(timestamp_utc) AS max_ts
+        FROM position_history
+        GROUP BY mmsi
+    ) latest ON ph.mmsi = latest.mmsi AND ph.timestamp_utc = latest.max_ts
+    JOIN vessels v ON ph.mmsi = v.mmsi
+    LEFT JOIN ship_types stype ON v.ship_type = stype.ship_type
+    {where_sql}
+    ORDER BY RANDOM()
+    LIMIT :lim
+    """
+    rows = _rows_to_dicts(conn.execute(sql, params))
+    return rows
+
+
+@app.get("/api/ship-categories")
+async def ship_categories():
+    """Return all ship type categories with their types and vessel counts."""
+    conn = _get_conn()
+    rows = _rows_to_dicts(conn.execute("""
+        SELECT
+            COALESCE(st.category, 'Unknown') AS category,
+            v.ship_type AS ship_type_code,
+            COALESCE(st.label, 'Unknown') AS ship_type_label,
+            COUNT(*) AS vessel_count
+        FROM vessels v
+        LEFT JOIN ship_types st ON v.ship_type = st.ship_type
+        GROUP BY COALESCE(st.category, 'Unknown'), v.ship_type
+        ORDER BY category, vessel_count DESC
+    """))
+    return rows
+
+
+@app.get("/api/ais-coverage")
+async def ais_coverage():
+    """Return AIS message counts per minute for the coverage timeline."""
+    conn = _get_conn()
+    rows = _rows_to_dicts(conn.execute(
+        "SELECT bucket_start, message_count FROM ais_message_counts ORDER BY bucket_start"
+    ))
     return rows
 
 
@@ -357,7 +458,7 @@ async def db_metrics():
     for tbl_name in [
         "vessels", "position_history", "destination_history",
         "draught_history", "navigational_status_history", "ship_name_history",
-        "ship_types", "nav_statuses",
+        "ship_types", "nav_statuses", "ais_message_counts", "vessel_details",
     ]:
         try:
             row_count = conn.execute(f"SELECT COUNT(*) FROM [{tbl_name}]").fetchone()[0]

@@ -146,6 +146,43 @@ CREATE INDEX IF NOT EXISTS idx_pos_mmsi_ts   ON position_history(mmsi, timestamp
 CREATE INDEX IF NOT EXISTS idx_pos_ts        ON position_history(timestamp_utc);
 
 -- =========================================================================
+-- AIS message counts per minute  (populated at ingest time)
+-- Tracks how many AIS messages were received in each 60-second bucket.
+-- Even zero-count minutes are recorded to show coverage gaps.
+-- bucket_start is the Unix epoch second at the start of the minute
+-- (i.e. timestamp floored to 60s: (ts / 60) * 60).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS ais_message_counts (
+    bucket_start    INTEGER PRIMARY KEY,
+    message_count   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_ais_msg_bucket ON ais_message_counts(bucket_start);
+
+-- =========================================================================
+-- Vessel details  (enrichment data from external APIs)
+-- Populated by vessel_enrichment/enrich.py — not by the AIS ingestor.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS vessel_details (
+    mmsi                INTEGER PRIMARY KEY REFERENCES vessels(mmsi),
+    gross_tonnage       REAL,
+    net_tonnage         REAL,
+    deadweight_tonnage  REAL,
+    year_built          INTEGER,
+    flag_country        TEXT,
+    flag_code           TEXT,
+    class_society       TEXT,
+    registered_owner    TEXT,
+    operator            TEXT,
+    vessel_category     TEXT,
+    hull_type           TEXT,
+    engine_type         TEXT,
+    max_speed_knots     REAL,
+    source              TEXT,
+    enriched_at         INTEGER NOT NULL DEFAULT (CAST(strftime('%s', 'now') AS INTEGER))
+);
+
+-- =========================================================================
 -- R*Tree spatial index  (built-in SQLite, no extension needed)
 -- Maps position_history.id → bounding box (point = min==max)
 -- =========================================================================
@@ -388,4 +425,58 @@ LEFT JOIN ship_types st ON v.ship_type = st.ship_type
 WHERE c.rn = 1
   AND (:ship_type IS NULL OR v.ship_type = :ship_type)
 ORDER BY c.mmsi;
+"""
+
+# =========================================================================
+# Upsert AIS message count for a 60-second bucket
+# =========================================================================
+UPSERT_AIS_MESSAGE_COUNT_SQL = """
+INSERT INTO ais_message_counts (bucket_start, message_count)
+VALUES (:bucket_start, :message_count)
+ON CONFLICT(bucket_start) DO UPDATE SET
+    message_count = ais_message_counts.message_count + excluded.message_count;
+"""
+
+# =========================================================================
+# Parametric query: latest positions filtered by ship types + bounding box
+# =========================================================================
+# Used by the optimized global map endpoint. Filters by:
+#   :ship_types — comma-separated list of ship_type codes (or NULL for all)
+#   :min_lat, :max_lat, :min_lon, :max_lon — viewport bounding box
+#   :limit — max rows to return
+# =========================================================================
+LATEST_POSITIONS_BBOX_SQL = """
+SELECT
+    ph.mmsi,
+    v.ship_name,
+    v.ship_type,
+    COALESCE(st.label, 'Unknown') AS ship_type_label,
+    COALESCE(st.category, 'Unknown') AS category,
+    ph.timestamp_utc,
+    ph.latitude,
+    ph.longitude,
+    ph.speed_over_ground,
+    ph.course_over_ground,
+    ph.true_heading
+FROM position_history ph
+INNER JOIN (
+    SELECT mmsi, MAX(timestamp_utc) AS max_ts
+    FROM position_history
+    GROUP BY mmsi
+) latest ON ph.mmsi = latest.mmsi AND ph.timestamp_utc = latest.max_ts
+JOIN vessels v ON ph.mmsi = v.mmsi
+LEFT JOIN ship_types st ON v.ship_type = st.ship_type
+WHERE ph.latitude BETWEEN :min_lat AND :max_lat
+  AND ph.longitude BETWEEN :min_lon AND :max_lon
+ORDER BY RANDOM()
+LIMIT :limit;
+"""
+
+# =========================================================================
+# Query: AIS time coverage (message counts per minute)
+# =========================================================================
+AIS_COVERAGE_SQL = """
+SELECT bucket_start, message_count
+FROM ais_message_counts
+ORDER BY bucket_start;
 """

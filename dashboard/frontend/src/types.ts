@@ -80,6 +80,13 @@ export interface LoadingStep {
   durationMs?: number;
 }
 
+export interface ShipCategoryInfo {
+  category: string;
+  ship_type_code: number | null;
+  ship_type_label: string;
+  vessel_count: number;
+}
+
 export interface DbMetrics {
   total_vessels: number;
   total_positions: number;

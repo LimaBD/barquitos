@@ -102,6 +102,8 @@ struct ParsedFile {
     draughts: Vec<DraughtRow>,
     nav_statuses: Vec<NavStatusRow>,
     ship_names: Vec<ShipNameRow>,
+    /// AIS message counts per 60-second bucket: bucket_start → count
+    message_counts: HashMap<i64, i64>,
     total_lines: u64,
     skipped_non_commercial: u64,
     /// MMSIs discovered as non-commercial during parsing of this file
@@ -423,6 +425,12 @@ const SHIP_NAME_INSERT: &str = "\
 INSERT INTO ship_name_history (mmsi, ship_name, timestamp_utc)
 VALUES (?1, ?2, ?3)";
 
+const MESSAGE_COUNT_UPSERT: &str = "\
+INSERT INTO ais_message_counts (bucket_start, message_count)
+VALUES (?1, ?2)
+ON CONFLICT(bucket_start) DO UPDATE SET
+    message_count = ais_message_counts.message_count + excluded.message_count";
+
 // =========================================================================
 // PARALLEL file parser — reads and parses a single file on a rayon thread
 // =========================================================================
@@ -474,8 +482,16 @@ fn parse_file(
             let mut draughts = Vec::new();
             let mut nav_statuses = Vec::new();
             let mut ship_names = Vec::new();
+            let mut message_counts: HashMap<i64, i64> = HashMap::new();
             let mut skipped_non_commercial: u64 = 0;
             let mut new_non_commercial: HashSet<i64> = HashSet::new();
+
+            // Ingest-time dedup tracking: last known values per mmsi
+            let mut last_draught: HashMap<i64, i64> = HashMap::new(); // mmsi → draught bits
+            let mut last_nav_status: HashMap<i64, i64> = HashMap::new(); // mmsi → nav status
+            let mut last_ship_name: HashMap<i64, String> = HashMap::new(); // mmsi → name
+            let mut last_position_ts: HashMap<i64, i64> = HashMap::new(); // mmsi → last ts
+            let mut last_destination: HashMap<i64, (Option<String>, Option<i64>)> = HashMap::new(); // mmsi → (dest, eta)
 
             for line in chunk {
                 let record: AisRecord = match serde_json::from_str(line) {
@@ -509,16 +525,36 @@ fn parse_file(
                                 skipped_non_commercial += 1;
                                 continue;
                             }
+                            // Count this message in the appropriate 60s bucket
+                            let bucket = (vs.seen_utc / 60) * 60;
+                            *message_counts.entry(bucket).or_insert(0) += 1;
                             vessels_static.push(vs);
                         }
                         if let Some(dest) = extract_destination(msg, meta) {
-                            destinations.push(dest);
+                            // Ingest-time dedup: only keep if destination or ETA changed
+                            let key = (dest.destination.clone(), dest.estimated_arrival);
+                            let dominated = last_destination.get(&mmsi).map_or(false, |prev| *prev == key);
+                            if !dominated {
+                                last_destination.insert(mmsi, key);
+                                destinations.push(dest);
+                            }
                         }
                         if let Some(dr) = extract_draught(msg, meta) {
-                            draughts.push(dr);
+                            // Ingest-time dedup: only keep if draught changed
+                            let draught_bits = dr.draught.to_bits() as i64;
+                            let dominated = last_draught.get(&mmsi).map_or(false, |&prev| prev == draught_bits);
+                            if !dominated {
+                                last_draught.insert(mmsi, draught_bits);
+                                draughts.push(dr);
+                            }
                         }
                         if let Some(sn) = extract_ship_name(msg, meta) {
-                            ship_names.push(sn);
+                            // Ingest-time dedup: only keep if name changed
+                            let dominated = last_ship_name.get(&mmsi).map_or(false, |prev| *prev == sn.ship_name);
+                            if !dominated {
+                                last_ship_name.insert(mmsi, sn.ship_name.clone());
+                                ship_names.push(sn);
+                            }
                         }
                     }
 
@@ -527,7 +563,17 @@ fn parse_file(
                     | "ExtendedClassBPositionReport"
                     | "StandardSearchAndRescueAircraftReport" => {
                         if let Some(pos) = extract_position(msg, meta) {
-                            positions.push(pos);
+                            // Ingest-time dedup: skip if same vessel reported within last 5s
+                            let dominated = last_position_ts.get(&mmsi).map_or(false, |&prev_ts| {
+                                (pos.timestamp_utc - prev_ts).abs() < 5
+                            });
+                            if !dominated {
+                                last_position_ts.insert(mmsi, pos.timestamp_utc);
+                                // Count this message in the appropriate 60s bucket
+                                let bucket = (pos.timestamp_utc / 60) * 60;
+                                *message_counts.entry(bucket).or_insert(0) += 1;
+                                positions.push(pos);
+                            }
                             let ship_name = meta
                                 .ship_name
                                 .as_deref()
@@ -545,11 +591,21 @@ fn parse_file(
                             );
                         }
                         if let Some(ns) = extract_nav_status(msg, meta) {
-                            nav_statuses.push(ns);
+                            // Ingest-time dedup: only keep if status changed
+                            let dominated = last_nav_status.get(&mmsi).map_or(false, |&prev| prev == ns.navigational_status);
+                            if !dominated {
+                                last_nav_status.insert(mmsi, ns.navigational_status);
+                                nav_statuses.push(ns);
+                            }
                         }
                     }
 
                     _ => {
+                        // Count in bucket using AIS timestamp
+                        let ts = parse_ais_time(meta.time_utc.as_deref().unwrap_or(""));
+                        let bucket = (ts / 60) * 60;
+                        *message_counts.entry(bucket).or_insert(0) += 1;
+
                         let ship_name = meta
                             .ship_name
                             .as_deref()
@@ -560,9 +616,7 @@ fn parse_file(
                             VesselMinimalRow {
                                 mmsi,
                                 ship_name,
-                                seen_utc: parse_ais_time(
-                                    meta.time_utc.as_deref().unwrap_or(""),
-                                ),
+                                seen_utc: ts,
                             },
                         );
                     }
@@ -579,6 +633,7 @@ fn parse_file(
                 draughts,
                 nav_statuses,
                 ship_names,
+                message_counts,
                 total_lines: 0,
                 skipped_non_commercial,
                 new_non_commercial,
@@ -597,6 +652,7 @@ fn parse_file(
         draughts: Vec::new(),
         nav_statuses: Vec::new(),
         ship_names: Vec::new(),
+        message_counts: HashMap::new(),
         total_lines,
         skipped_non_commercial: 0,
         new_non_commercial: HashSet::new(),
@@ -611,6 +667,10 @@ fn parse_file(
         merged.draughts.extend(part.draughts);
         merged.nav_statuses.extend(part.nav_statuses);
         merged.ship_names.extend(part.ship_names);
+        // Merge message counts (sum across chunks)
+        for (bucket, count) in part.message_counts {
+            *merged.message_counts.entry(bucket).or_insert(0) += count;
+        }
         merged.skipped_non_commercial += part.skipped_non_commercial;
         merged.new_non_commercial.extend(part.new_non_commercial);
     }
@@ -647,6 +707,9 @@ fn write_parsed_to_db(
     insert_draughts(&tx, &parsed.draughts)?;
     insert_nav_statuses(&tx, &parsed.nav_statuses)?;
     insert_ship_names(&tx, &parsed.ship_names)?;
+
+    // 2b) AIS message counts
+    insert_message_counts(&tx, &parsed.message_counts)?;
 
     // 3) Positions + R*Tree
     let max_id_before: i64 = tx.query_row(
@@ -711,6 +774,7 @@ fn write_all_to_db(
         insert_draughts(&tx, &pf.draughts)?;
         insert_nav_statuses(&tx, &pf.nav_statuses)?;
         insert_ship_names(&tx, &pf.ship_names)?;
+        insert_message_counts(&tx, &pf.message_counts)?;
         total_dest += pf.destinations.len();
         total_dr += pf.draughts.len();
         total_nav += pf.nav_statuses.len();
@@ -812,8 +876,33 @@ fn insert_destinations(tx: &Transaction, rows: &[DestinationRow]) -> Result<(), 
     if rows.is_empty() {
         return Ok(());
     }
+    // DB-level dedup: load last known (destination, eta) per mmsi so we
+    // skip rows that repeat the same value across file boundaries.
+    let mut last: HashMap<i64, (String, i64)> = HashMap::new();
+    {
+        let mut q = tx.prepare_cached(
+            "SELECT mmsi, COALESCE(destination,''), COALESCE(estimated_arrival,0) \
+             FROM destination_history \
+             WHERE id IN (SELECT MAX(id) FROM destination_history GROUP BY mmsi)"
+        )?;
+        let mut qrows = q.query([])?;
+        while let Some(r) = qrows.next()? {
+            let mmsi: i64 = r.get(0)?;
+            let dest: String = r.get(1)?;
+            let eta: i64 = r.get(2)?;
+            last.insert(mmsi, (dest, eta));
+        }
+    }
     let mut stmt = tx.prepare_cached(DESTINATION_INSERT)?;
     for r in rows {
+        let key = (
+            r.destination.clone().unwrap_or_default(),
+            r.estimated_arrival.unwrap_or(0),
+        );
+        if last.get(&r.mmsi).map_or(false, |prev| *prev == key) {
+            continue;
+        }
+        last.insert(r.mmsi, key);
         stmt.execute(params![r.mmsi, r.destination, r.estimated_arrival, r.timestamp_utc])?;
     }
     Ok(())
@@ -823,8 +912,27 @@ fn insert_draughts(tx: &Transaction, rows: &[DraughtRow]) -> Result<(), rusqlite
     if rows.is_empty() {
         return Ok(());
     }
+    // DB-level dedup: load last known draught per mmsi
+    let mut last: HashMap<i64, i64> = HashMap::new();
+    {
+        let mut q = tx.prepare_cached(
+            "SELECT mmsi, draught FROM draught_history \
+             WHERE id IN (SELECT MAX(id) FROM draught_history GROUP BY mmsi)"
+        )?;
+        let mut qrows = q.query([])?;
+        while let Some(r) = qrows.next()? {
+            let mmsi: i64 = r.get(0)?;
+            let d: f64 = r.get(1)?;
+            last.insert(mmsi, d.to_bits() as i64);
+        }
+    }
     let mut stmt = tx.prepare_cached(DRAUGHT_INSERT)?;
     for r in rows {
+        let bits = r.draught.to_bits() as i64;
+        if last.get(&r.mmsi).map_or(false, |&prev| prev == bits) {
+            continue;
+        }
+        last.insert(r.mmsi, bits);
         stmt.execute(params![r.mmsi, r.draught, r.timestamp_utc])?;
     }
     Ok(())
@@ -834,8 +942,26 @@ fn insert_nav_statuses(tx: &Transaction, rows: &[NavStatusRow]) -> Result<(), ru
     if rows.is_empty() {
         return Ok(());
     }
+    // DB-level dedup: load last known nav status per mmsi
+    let mut last: HashMap<i64, i64> = HashMap::new();
+    {
+        let mut q = tx.prepare_cached(
+            "SELECT mmsi, navigational_status FROM navigational_status_history \
+             WHERE id IN (SELECT MAX(id) FROM navigational_status_history GROUP BY mmsi)"
+        )?;
+        let mut qrows = q.query([])?;
+        while let Some(r) = qrows.next()? {
+            let mmsi: i64 = r.get(0)?;
+            let ns: i64 = r.get(1)?;
+            last.insert(mmsi, ns);
+        }
+    }
     let mut stmt = tx.prepare_cached(NAV_STATUS_INSERT)?;
     for r in rows {
+        if last.get(&r.mmsi).map_or(false, |&prev| prev == r.navigational_status) {
+            continue;
+        }
+        last.insert(r.mmsi, r.navigational_status);
         stmt.execute(params![r.mmsi, r.navigational_status, r.timestamp_utc])?;
     }
     Ok(())
@@ -845,9 +971,38 @@ fn insert_ship_names(tx: &Transaction, rows: &[ShipNameRow]) -> Result<(), rusql
     if rows.is_empty() {
         return Ok(());
     }
+    // DB-level dedup: load last known ship name per mmsi
+    let mut last: HashMap<i64, String> = HashMap::new();
+    {
+        let mut q = tx.prepare_cached(
+            "SELECT mmsi, ship_name FROM ship_name_history \
+             WHERE id IN (SELECT MAX(id) FROM ship_name_history GROUP BY mmsi)"
+        )?;
+        let mut qrows = q.query([])?;
+        while let Some(r) = qrows.next()? {
+            let mmsi: i64 = r.get(0)?;
+            let name: String = r.get(1)?;
+            last.insert(mmsi, name);
+        }
+    }
     let mut stmt = tx.prepare_cached(SHIP_NAME_INSERT)?;
     for r in rows {
+        if last.get(&r.mmsi).map_or(false, |prev| *prev == r.ship_name) {
+            continue;
+        }
+        last.insert(r.mmsi, r.ship_name.clone());
         stmt.execute(params![r.mmsi, r.ship_name, r.timestamp_utc])?;
+    }
+    Ok(())
+}
+
+fn insert_message_counts(tx: &Transaction, counts: &HashMap<i64, i64>) -> Result<(), rusqlite::Error> {
+    if counts.is_empty() {
+        return Ok(());
+    }
+    let mut stmt = tx.prepare_cached(MESSAGE_COUNT_UPSERT)?;
+    for (&bucket, &count) in counts {
+        stmt.execute(params![bucket, count])?;
     }
     Ok(())
 }

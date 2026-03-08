@@ -5,8 +5,8 @@ const menuItems = [
     key: 'map',
     icon: '🗺️',
     title: 'Global Ship Map',
-    description: 'Real-time and playback view of all vessels. Track ships globally on an interactive map.',
-    path: '/map',
+    description: 'Select vessel types and view them on an interactive map. Filter, zoom, and refresh in real-time.',
+    path: '/select-types',
     accent: 'var(--accent)',
   },
   {
