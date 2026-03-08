@@ -117,11 +117,4 @@ export interface DbMetrics {
     table: string;
     row_count: number;
   }>;
-  top_vessels: Array<{
-    mmsi: number;
-    ship_name: string | null;
-    ship_type_label: string;
-    category: string;
-    position_count: number;
-  }>;
 }

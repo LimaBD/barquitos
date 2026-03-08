@@ -242,35 +242,6 @@ export default function DbMetricsPage() {
           </table>
         </div>
 
-        {/* Top vessels by position count */}
-        <div className="metrics-card">
-          <h2>Top 10 Vessels (by reports)</h2>
-          <table className="metrics-table">
-            <thead>
-              <tr>
-                <th>Vessel</th>
-                <th>Category</th>
-                <th>Positions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {metrics.top_vessels.map(v => (
-                <tr key={v.mmsi}>
-                  <td className="table-name">
-                    {v.ship_name || v.mmsi}
-                    <span className="mmsi-sub">MMSI {v.mmsi}</span>
-                  </td>
-                  <td>
-                    <span className={`category-badge ${v.category.toLowerCase()}`}>
-                      {v.category}
-                    </span>
-                  </td>
-                  <td className="table-count">{formatNumber(v.position_count)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
       </div>
 
       {/* Time range info */}

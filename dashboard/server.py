@@ -466,24 +466,6 @@ async def db_metrics():
         except Exception:
             pass
 
-    # ── Top 10 vessels with most position reports ──────────────────────
-    top_vessels = _rows_to_dicts(conn.execute(
-        """
-        SELECT
-            ph.mmsi,
-            v.ship_name,
-            COALESCE(st.label, 'Unknown') AS ship_type_label,
-            COALESCE(st.category, 'Unknown') AS category,
-            COUNT(*) AS position_count
-        FROM position_history ph
-        JOIN vessels v ON ph.mmsi = v.mmsi
-        LEFT JOIN ship_types st ON v.ship_type = st.ship_type
-        GROUP BY ph.mmsi
-        ORDER BY position_count DESC
-        LIMIT 10
-        """
-    ))
-
     return {
         "total_vessels": total_vessels,
         "total_positions": total_positions,
@@ -497,7 +479,6 @@ async def db_metrics():
         "positions_per_day": positions_per_day,
         "db_size_bytes": db_size_bytes,
         "table_sizes": table_sizes,
-        "top_vessels": top_vessels,
     }
 
 
