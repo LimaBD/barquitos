@@ -669,20 +669,8 @@ fn write_parsed_to_db(
     insert_ship_names(&tx, &parsed.ship_names)?;
     insert_message_counts(&tx, &parsed.message_counts)?;
 
-    let max_id_before: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(id), 0) FROM position_history",
-        [],
-        |row| row.get(0),
-    )?;
-
     insert_positions(&tx, &parsed.positions)?;
-
-    tx.execute(
-        "INSERT INTO position_history_rtree (id, min_lat, max_lat, min_lon, max_lon)
-         SELECT id, latitude, latitude, longitude, longitude
-         FROM position_history WHERE id > ?1",
-        params![max_id_before],
-    )?;
+    insert_positions_rtree(&tx, &parsed.positions)?;
 
     tx.commit()?;
 
@@ -747,40 +735,25 @@ fn write_all_to_db(
     info!("    ⏱  History tables: {:.2}s", (t2 - t1).as_secs_f64());
 
     // 3) Positions + R*Tree for all files
-    let max_id_before: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(id), 0) FROM position_history",
-        [],
-        |row| row.get(0),
-    )?;
-
     for pf in parsed_files {
         insert_positions(&tx, &pf.positions)?;
+        insert_positions_rtree(&tx, &pf.positions)?;
         total_pos += pf.positions.len();
     }
 
     let t3 = Instant::now();
-    info!("    ⏱  Positions insert: {:.2}s", (t3 - t2).as_secs_f64());
-
-    tx.execute(
-        "INSERT INTO position_history_rtree (id, min_lat, max_lat, min_lon, max_lon)
-         SELECT id, latitude, latitude, longitude, longitude
-         FROM position_history WHERE id > ?1",
-        params![max_id_before],
-    )?;
-
-    let t4 = Instant::now();
-    info!("    ⏱  R*Tree update: {:.2}s", (t4 - t3).as_secs_f64());
+    info!("    ⏱  Positions + R*Tree insert: {:.2}s", (t3 - t2).as_secs_f64());
 
     tx.commit()?;
 
-    let t5 = Instant::now();
-    info!("    ⏱  Commit (fsync): {:.2}s", (t5 - t4).as_secs_f64());
+    let t4 = Instant::now();
+    info!("    ⏱  Commit (fsync): {:.2}s", (t4 - t3).as_secs_f64());
 
     info!(
         "  ✅  BATCH COMMIT: {} files → {} pos, {} dest, {} dr, {} nav, {} names, {} static, {} minimal in {:.2}s",
         parsed_files.len(),
         total_pos, total_dest, total_dr, total_nav, total_names, total_static, total_minimal,
-        (t5 - t0).as_secs_f64(),
+        (t4 - t0).as_secs_f64(),
     );
 
     Ok(())
@@ -844,6 +817,25 @@ fn insert_positions(tx: &Transaction, rows: &[PositionRow]) -> Result<(), rusqli
             r.rate_of_turn,
         ])?;
     }
+    Ok(())
+}
+
+/// Insert R*Tree entries for positions that were just inserted.
+/// Uses `last_insert_rowid()` to derive the id range, avoiding an
+/// expensive `SELECT MAX(id)` scan that gets slower as the table grows.
+fn insert_positions_rtree(tx: &Transaction, rows: &[PositionRow]) -> Result<(), rusqlite::Error> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let last_id: i64 = tx.query_row("SELECT last_insert_rowid()", [], |row| row.get(0))?;
+    // The ids for the batch are (last_id - count + 1) .. last_id
+    let first_id = last_id - rows.len() as i64 + 1;
+    tx.execute(
+        "INSERT INTO position_history_rtree (id, min_lat, max_lat, min_lon, max_lon)
+         SELECT id, latitude, latitude, longitude, longitude
+         FROM position_history WHERE id BETWEEN ?1 AND ?2",
+        params![first_id, last_id],
+    )?;
     Ok(())
 }
 
