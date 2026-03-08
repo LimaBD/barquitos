@@ -42,35 +42,43 @@ CREATE TABLE IF NOT EXISTS ship_name_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
     ship_name       TEXT    NOT NULL,
-    timestamp_utc   INTEGER NOT NULL
+    timestamp_utc   INTEGER NOT NULL,
+    deduplicated    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_shipname_mmsi ON ship_name_history(mmsi, timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_shipname_dedup ON ship_name_history(deduplicated) WHERE deduplicated = 0;
 
 CREATE TABLE IF NOT EXISTS destination_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
     destination     TEXT,
     estimated_arrival INTEGER,
-    timestamp_utc   INTEGER NOT NULL
+    timestamp_utc   INTEGER NOT NULL,
+    deduplicated    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_dest_mmsi ON destination_history(mmsi, timestamp_utc);
 CREATE INDEX IF NOT EXISTS idx_dest_dest ON destination_history(destination);
+CREATE INDEX IF NOT EXISTS idx_dest_dedup ON destination_history(deduplicated) WHERE deduplicated = 0;
 
 CREATE TABLE IF NOT EXISTS draught_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi            INTEGER NOT NULL REFERENCES vessels(mmsi),
     draught         REAL    NOT NULL,
-    timestamp_utc   INTEGER NOT NULL
+    timestamp_utc   INTEGER NOT NULL,
+    deduplicated    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_draught_mmsi ON draught_history(mmsi, timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_draught_dedup ON draught_history(deduplicated) WHERE deduplicated = 0;
 
 CREATE TABLE IF NOT EXISTS navigational_status_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     navigational_status INTEGER NOT NULL,
-    timestamp_utc       INTEGER NOT NULL
+    timestamp_utc       INTEGER NOT NULL,
+    deduplicated        INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_navstatus_mmsi ON navigational_status_history(mmsi, timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_navstatus_dedup ON navigational_status_history(deduplicated) WHERE deduplicated = 0;
 
 CREATE TABLE IF NOT EXISTS position_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,10 +89,12 @@ CREATE TABLE IF NOT EXISTS position_history (
     speed_over_ground   REAL,
     course_over_ground  REAL,
     true_heading        INTEGER,
-    rate_of_turn        REAL
+    rate_of_turn        REAL,
+    deduplicated    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_pos_mmsi_ts ON position_history(mmsi, timestamp_utc);
 CREATE INDEX IF NOT EXISTS idx_pos_ts      ON position_history(timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_pos_dedup   ON position_history(deduplicated) WHERE deduplicated = 0;
 
 CREATE TABLE IF NOT EXISTS ais_message_counts (
     bucket_start    INTEGER PRIMARY KEY,

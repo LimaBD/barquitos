@@ -81,10 +81,12 @@ CREATE TABLE IF NOT EXISTS ship_name_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     ship_name           TEXT    NOT NULL,
-    timestamp_utc       INTEGER NOT NULL
+    timestamp_utc       INTEGER NOT NULL,
+    deduplicated        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_shipname_mmsi ON ship_name_history(mmsi, timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_shipname_dedup ON ship_name_history(deduplicated) WHERE deduplicated = 0;
 
 -- =========================================================================
 -- Destination history  (destination & ETA snapshots from ShipStaticData)
@@ -94,11 +96,13 @@ CREATE TABLE IF NOT EXISTS destination_history (
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     destination         TEXT,
     estimated_arrival   INTEGER,
-    timestamp_utc       INTEGER NOT NULL
+    timestamp_utc       INTEGER NOT NULL,
+    deduplicated        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_dest_mmsi ON destination_history(mmsi, timestamp_utc);
 CREATE INDEX IF NOT EXISTS idx_dest_dest ON destination_history(destination);
+CREATE INDEX IF NOT EXISTS idx_dest_dedup ON destination_history(deduplicated) WHERE deduplicated = 0;
 
 -- =========================================================================
 -- Draught history  (draught snapshots from ShipStaticData)
@@ -107,10 +111,12 @@ CREATE TABLE IF NOT EXISTS draught_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     draught             REAL    NOT NULL,
-    timestamp_utc       INTEGER NOT NULL
+    timestamp_utc       INTEGER NOT NULL,
+    deduplicated        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_draught_mmsi ON draught_history(mmsi, timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_draught_dedup ON draught_history(deduplicated) WHERE deduplicated = 0;
 
 -- =========================================================================
 -- Navigational-status history  (changes infrequently, ~3 times/month)
@@ -120,10 +126,12 @@ CREATE TABLE IF NOT EXISTS navigational_status_history (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     mmsi                INTEGER NOT NULL REFERENCES vessels(mmsi),
     navigational_status INTEGER NOT NULL,
-    timestamp_utc       INTEGER NOT NULL
+    timestamp_utc       INTEGER NOT NULL,
+    deduplicated        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_navstatus_mmsi ON navigational_status_history(mmsi, timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_navstatus_dedup ON navigational_status_history(deduplicated) WHERE deduplicated = 0;
 
 -- =========================================================================
 -- Position history  (the large time-series table)
@@ -137,13 +145,15 @@ CREATE TABLE IF NOT EXISTS position_history (
     speed_over_ground   REAL,
     course_over_ground  REAL,
     true_heading        INTEGER,
-    rate_of_turn        REAL
+    rate_of_turn        REAL,
+    deduplicated        INTEGER NOT NULL DEFAULT 0
 );
 
 -- Composite index for typical queries: "all positions for vessel X in time range"
 CREATE INDEX IF NOT EXISTS idx_pos_mmsi_ts   ON position_history(mmsi, timestamp_utc);
 -- Index for time-range scans across all vessels
 CREATE INDEX IF NOT EXISTS idx_pos_ts        ON position_history(timestamp_utc);
+CREATE INDEX IF NOT EXISTS idx_pos_dedup     ON position_history(deduplicated) WHERE deduplicated = 0;
 
 -- =========================================================================
 -- AIS message counts per minute  (populated at ingest time)
