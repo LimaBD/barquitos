@@ -204,13 +204,19 @@ export default function MapPage() {
   // ── load positions at ts ─────────────────────────────────────────
   const loadPositionsAt = useCallback(async (ts: number) => {
     try {
-      const pos = await fetchPositionsAt(ts, 30);
+      const pos = await fetchPositionsAt(
+        ts,
+        900,
+        undefined,
+        selectedCategories.length > 0 ? selectedCategories : undefined,
+      );
       setPositions(pos);
       setTotalVessels(pos.length);
     } catch (err) {
       console.error(err);
     }
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCategories.join(',')]);
 
   // ── when currentTs changes in playback mode, load new positions ──
   const lastFetchTs = useRef(0);

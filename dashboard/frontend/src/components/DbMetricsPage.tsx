@@ -11,8 +11,8 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(1024, i)).toFixed(i > 0 ? 2 : 0)} ${units[i]}`;
 }
 
-function formatNumber(n: number): string {
-  return n.toLocaleString();
+function formatNumber(n: number | undefined | null): string {
+  return (n ?? 0).toLocaleString();
 }
 
 function formatDuration(tsMin: number, tsMax: number): string {
@@ -158,7 +158,7 @@ export default function DbMetricsPage() {
         </div>
         <div className="stat-chip">
           <span className="chip-label">Name changes</span>
-          <span className="chip-value">{formatNumber(metrics.total_ship_names)}</span>
+          <span className="chip-value">{formatNumber(metrics.total_name_changes)}</span>
         </div>
       </div>
 

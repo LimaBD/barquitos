@@ -27,11 +27,13 @@ export function fetchCoverage(bucketSeconds = 3600): Promise<CoverageBucket[]> {
 
 export function fetchPositionsAt(
   ts: number,
-  window = 30,
+  window = 900,
   shipType?: number,
+  categories?: string[],
 ): Promise<VesselPosition[]> {
   let url = `${BASE}/positions?ts=${ts}&window=${window}`;
   if (shipType != null) url += `&ship_type=${shipType}`;
+  if (categories?.length) url += `&categories=${categories.join(',')}`;
   return get(url);
 }
 

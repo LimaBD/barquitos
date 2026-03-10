@@ -42,12 +42,12 @@ export default function VesselPanel({ detail, trackLength, onClose }: Props) {
         <div className="info-grid">
           <InfoItem label="Length" value={vessel.length_m ? `${vessel.length_m} m` : '—'} />
           <InfoItem label="Beam" value={vessel.beam_m ? `${vessel.beam_m} m` : '—'} />
-          <InfoItem label="Max Draught" value={vessel.max_draught ? `${vessel.max_draught} m` : '—'} />
+          <InfoItem label="Max Draught" value={vessel.max_draught ? `${Number(vessel.max_draught).toFixed(2)} m` : '—'} />
           <InfoItem label="AIS Type" value={vessel.ship_type != null ? `${vessel.ship_type}` : '—'} />
           <InfoItem label="First Seen" value={formatDateTime(vessel.first_seen_utc)} />
           <InfoItem label="Last Seen" value={formatDateTime(vessel.last_seen_utc)} />
-          <InfoItem label="Positions" value={position_count.toLocaleString()} />
-          <InfoItem label="Track Points" value={trackLength.toLocaleString()} />
+          <InfoItem label="Positions" value={(position_count ?? 0).toLocaleString()} />
+          <InfoItem label="Track Points" value={(trackLength ?? 0).toLocaleString()} />
         </div>
 
         {/* Destinations */}
@@ -85,7 +85,7 @@ export default function VesselPanel({ detail, trackLength, onClose }: Props) {
             <div className="section-title">Draught History</div>
             {draughts.map((d, i) => (
               <div key={i} className="history-item">
-                <div className="hist-val">{d.draught} m</div>
+                <div className="hist-val">{Number(d.draught).toFixed(2)} m</div>
                 <div className="hist-time">{formatDateTime(d.timestamp_utc)}</div>
               </div>
             ))}

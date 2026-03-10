@@ -93,7 +93,7 @@ export interface DbMetrics {
   total_destinations: number;
   total_draughts: number;
   total_nav_statuses: number;
-  total_ship_names: number;
+  total_name_changes: number;
   vessels_by_type: Array<{
     ship_type_label: string;
     category: string;

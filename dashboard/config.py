@@ -2,10 +2,10 @@
 
 import os
 
-# SQLite database path
-DATABASE_PATH = os.environ.get(
-    "BARQUITOS_DB",
-    os.path.join("/mnt", "wdblack", "barquitos.db"),
+# Parquet Data Lake root path
+LAKE_ROOT = os.environ.get(
+    "LAKE_ROOT",
+    os.path.join("/mnt", "wdblack", "trading_lake"),
 )
 
 # Server settings

@@ -33,15 +33,28 @@ ais_ingestor_rs/target/
 # ----- Data (large / generated) ---------------------------------------------
 # Raw AIS JSONL files (collected data — too large for git)
 ais_collector/data_samples/
+ais_ingestor_rs/test_data/
 *.jsonl
 
-# SQLite databases
+# Database files
 *.db
 *.db-wal
 *.db-shm
 
+# Parquet Data Lake (lives on /mnt/wdblack/trading_lake/)
+*.parquet
+trading_lake/
+
 # Processed / backup data
 ais_processed/
+
+# PID / log files from ingestor daemon
+*.pid
+ais_ingestor_rs/*.log
+
+# ----- Node / Frontend ------------------------------------------------------
+node_modules/
+dashboard/frontend/dist/
 
 # ----- OS -------------------------------------------------------------------
 .DS_Store

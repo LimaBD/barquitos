@@ -4,8 +4,12 @@ A custom ship-tracking dashboard with a world map and Dahua-style timeline scrub
 
 ## Architecture
 
-- **Backend**: Python FastAPI server (`server.py`) — queries the SQLite database and serves the SPA
+- **Backend**: Python FastAPI server (`server.py`) — queries the Parquet Data Lake via DuckDB
 - **Frontend**: React + TypeScript + Vite — Leaflet map with canvas-based timeline
+
+The backend reads Hive-partitioned Parquet files directly using DuckDB
+(in-memory connection, no persistent database). All data lives under
+`LAKE_ROOT/bronze/source=ais/` in 5 fact tables + 1 dimension table.
 
 ## Features
 
@@ -36,7 +40,7 @@ python -m dashboard.server
 The server starts on `http://0.0.0.0:8080` by default.
 
 Environment variables:
-- `BARQUITOS_DB` — path to the SQLite database (default: `/mnt/wdblack/barquitos.db`)
+- `LAKE_ROOT` — root of the Parquet Data Lake (default: `/mnt/wdblack/trading_lake`)
 - `DASHBOARD_HOST` — bind address (default: `0.0.0.0`)
 - `DASHBOARD_PORT` — port (default: `8080`)
 
@@ -63,7 +67,7 @@ Outputs to `dashboard/static/` which the FastAPI server serves automatically.
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/time-range` | Min/max timestamps in position_history |
+| `GET /api/time-range` | Min/max timestamps in positions |
 | `GET /api/coverage?bucket_seconds=3600` | Hourly buckets with position counts (timeline) |
 | `GET /api/positions?ts=<epoch>&window=30` | Vessel positions at a point in time |
 | `GET /api/latest-positions` | Most recent position of every vessel |
@@ -71,4 +75,20 @@ Outputs to `dashboard/static/` which the FastAPI server serves automatically.
 | `GET /api/vessel/{mmsi}/track` | Complete track for a vessel |
 | `GET /api/vessel/{mmsi}/track?start=<epoch>&end=<epoch>` | Partial track |
 | `GET /api/search?q=<text>` | Search vessels by name/MMSI |
+| `GET /api/ship-categories` | Vessel type categories with counts |
 | `GET /api/stats` | Quick stats (total vessels, positions, by type) |
+| `GET /api/db-metrics` | Comprehensive Data Lake metrics |
+| `GET /api/ais-coverage` | Ingestion health timeline |
+
+## Data Lake Tables
+
+The backend reads from these Parquet glob patterns:
+
+| Glob | Source |
+|---|---|
+| `{LAKE_ROOT}/bronze/source=ais/fact_position/**/*.parquet` | GPS pings (lat, lon, SOG, COG) |
+| `{LAKE_ROOT}/bronze/source=ais/dim_vessel/vessel_static.parquet` | Ship IMO, call sign, type, dimensions (edge-filtered) |
+| `{LAKE_ROOT}/bronze/source=ais/fact_draught/**/*.parquet` | Edge-filtered draught changes |
+| `{LAKE_ROOT}/bronze/source=ais/fact_navigational_status/**/*.parquet` | Edge-filtered nav status changes |
+| `{LAKE_ROOT}/bronze/source=ais/fact_destination/**/*.parquet` | Edge-filtered destination changes |
+| `{LAKE_ROOT}/bronze/source=ais/metric_system_health/**/*.parquet` | Ingestion throughput per window |
