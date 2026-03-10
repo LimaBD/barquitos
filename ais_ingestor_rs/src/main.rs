@@ -9,6 +9,7 @@
 
 mod config;
 mod edge_state;
+mod mount_check;
 mod parser;
 mod schema;
 mod writer;
@@ -40,9 +41,29 @@ fn main() {
     info!("  Input:     {}", config::AIS_INPUT_DIR);
     info!("  Processed: {}", config::AIS_PROCESSED_DIR);
     info!("  Lake root: {}", config::LAKE_ROOT);
+    info!("  Mount:     {}", config::MOUNT_POINT);
     info!("  Scan interval: {}s", config::SCAN_INTERVAL_SECS);
     info!("  Files per batch: {}", config::FILES_PER_BATCH);
+    info!("  Throttle: rest {}s every {} files",
+        config::THROTTLE_REST_SECS, config::THROTTLE_FILE_COUNT);
     info!("═══════════════════════════════════════════════════════════════");
+
+    // ── Pre-flight: verify mount is healthy ──
+    if !mount_check::wait_for_mount(config::MOUNT_POINT, config::MOUNT_CHECK_TIMEOUT_SECS, 3, 10)
+    {
+        error!("💀 Mount {} not available at startup. Aborting.", config::MOUNT_POINT);
+        std::process::exit(1);
+    }
+    info!("✅ Mount {} is healthy.", config::MOUNT_POINT);
+
+    // ── Start watchdog thread ──
+    // If mount becomes unresponsive at any point, the watchdog kills the process
+    // to prevent indefinite hangs on blocked I/O.
+    let _watchdog = mount_check::start_watchdog(
+        config::MOUNT_POINT,
+        config::MOUNT_CHECK_TIMEOUT_SECS,
+        config::WATCHDOG_INTERVAL_SECS,
+    );
 
     // Graceful shutdown on SIGINT / SIGTERM
     ctrlc::set_handler(|| {
@@ -59,11 +80,31 @@ fn main() {
     // Edge state persists across batches to correctly detect pivots
     let mut edge = EdgeState::new();
 
+    // Cumulative file counter for throttling (resets after rest)
+    let mut files_since_rest: u64 = 0;
+
     // Main loop: scan → ingest batch → COOLDOWN → repeat
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
             info!("Shutting down gracefully.");
             break;
+        }
+
+        // ── Mount health check before each batch ──
+        if !mount_check::ensure_mount_healthy(
+            config::MOUNT_POINT,
+            config::MOUNT_CHECK_TIMEOUT_SECS,
+        ) {
+            error!("Mount unhealthy before batch. Waiting for recovery …");
+            if !mount_check::wait_for_mount(
+                config::MOUNT_POINT,
+                config::MOUNT_CHECK_TIMEOUT_SECS,
+                10,
+                30,
+            ) {
+                error!("💀 Mount did not recover. Exiting.");
+                std::process::exit(1);
+            }
         }
 
         match scan_and_ingest(&mut edge) {
@@ -72,16 +113,28 @@ fn main() {
                 sleep_interruptible(config::SCAN_INTERVAL_SECS);
             }
             Ok(n) => {
-                info!("Batch complete: processed {n} files.");
-                // ⭐ MANDATORY COOLDOWN — even when more files are waiting.
-                // Without this, the ingestor runs a non-stop tight loop when
-                // there is a backlog (5 000+ files), saturating the HDD and
-                // starving the collector + shell + every other process.
-                info!(
-                    "Cooldown: {}s before next batch (lets collector & OS use the disk) …",
-                    config::COOLDOWN_AFTER_BATCH_SECS
-                );
-                sleep_interruptible(config::COOLDOWN_AFTER_BATCH_SECS);
+                files_since_rest += n as u64;
+                info!("Batch complete: processed {n} files ({files_since_rest} since last rest).");
+
+                // ── File-count throttling ──
+                if files_since_rest >= config::THROTTLE_FILE_COUNT {
+                    info!(
+                        "🛏️  Throttle: processed {} files — resting for {}s ({}min) …",
+                        files_since_rest,
+                        config::THROTTLE_REST_SECS,
+                        config::THROTTLE_REST_SECS / 60,
+                    );
+                    sleep_interruptible(config::THROTTLE_REST_SECS);
+                    files_since_rest = 0;
+                    info!("🔄 Throttle rest complete. Resuming ingestion.");
+                } else {
+                    // ⭐ MANDATORY COOLDOWN — even when more files are waiting.
+                    info!(
+                        "Cooldown: {}s before next batch (lets collector & OS use the disk) …",
+                        config::COOLDOWN_AFTER_BATCH_SECS
+                    );
+                    sleep_interruptible(config::COOLDOWN_AFTER_BATCH_SECS);
+                }
             }
             Err(e) => {
                 error!("Batch error: {e}");
@@ -121,6 +174,14 @@ fn sleep_ms_interruptible(ms: u64) {
 /// Scan the input directory for JSONL files, process up to FILES_PER_BATCH,
 /// flush to Parquet, and move processed files.  Returns number of files processed.
 fn scan_and_ingest(edge: &mut EdgeState) -> Result<usize, Box<dyn std::error::Error>> {
+    // ── Verify mount before reading the input directory ──
+    if !mount_check::ensure_mount_healthy(
+        config::MOUNT_POINT,
+        config::MOUNT_CHECK_TIMEOUT_SECS,
+    ) {
+        return Err("Mount unhealthy — skipping batch".into());
+    }
+
     let mut jsonl_files = list_jsonl_files(config::AIS_INPUT_DIR)?;
     if jsonl_files.is_empty() {
         return Ok(0);
@@ -243,6 +304,14 @@ fn scan_and_ingest(edge: &mut EdgeState) -> Result<usize, Box<dyn std::error::Er
         }
     }
 
+    // ── Verify mount before writing Parquet ──
+    if !mount_check::ensure_mount_healthy(
+        config::MOUNT_POINT,
+        config::MOUNT_CHECK_TIMEOUT_SECS,
+    ) {
+        return Err("Mount unhealthy before flush — aborting batch to prevent hang".into());
+    }
+
     // ── Flush all buffers to Parquet ────────────────────────────────────
     info!("Flushing buffers to Parquet …");
     let pos_count = flush_positions(config::LAKE_ROOT, &mut pos_buf)?;
@@ -261,6 +330,14 @@ fn scan_and_ingest(edge: &mut EdgeState) -> Result<usize, Box<dyn std::error::Er
         "Flush complete: {} positions, {} draughts, {} nav, {} dest, {} static, {} names",
         pos_count, dr_count, nav_count, dst_count, sta_count, name_count
     );
+
+    // ── Verify mount before moving files ──
+    if !mount_check::ensure_mount_healthy(
+        config::MOUNT_POINT,
+        config::MOUNT_CHECK_TIMEOUT_SECS,
+    ) {
+        return Err("Mount unhealthy before file move — aborting".into());
+    }
 
     // ── Move processed files ────────────────────────────────────────────
     for file_path in &batch {

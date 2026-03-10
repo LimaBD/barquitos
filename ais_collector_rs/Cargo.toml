@@ -1,0 +1,39 @@
+[package]
+name = "ais_collector_rs"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance AIS data collector — connects to AISstream.io WebSocket and writes raw JSONL files"
+
+[[bin]]
+name = "ais_collector"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# WebSocket client
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Time handling
+chrono = "0.4"
+
+# Signal handling
+tokio-util = "0.7"
+
+# Futures utilities
+futures-util = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

@@ -62,3 +62,26 @@ pub const LOG_EVERY_N_MESSAGES: u64 = 100_000;
 /// BufReader capacity for reading JSONL files.
 /// 256 KB — large enough to amortise HDD seeks on the mechanical drive.
 pub const BUF_READER_CAPACITY: usize = 256 * 1024;
+
+// ─── Mount-Point Safety ─────────────────────────────────────────────────
+
+/// The mount point that must be verified before any read/write.
+pub const MOUNT_POINT: &str = "/mnt/wdblack";
+
+/// Timeout in seconds to verify mount point is responsive.
+/// If stat()/readdir() doesn't respond within this window, the mount is
+/// considered hung (disconnected HDD, failed SATA link, etc.).
+pub const MOUNT_CHECK_TIMEOUT_SECS: u64 = 30;
+
+/// How often (seconds) the background watchdog thread checks mount health.
+pub const WATCHDOG_INTERVAL_SECS: u64 = 60;
+
+// ─── File-Count Throttling ──────────────────────────────────────────────
+
+/// After processing this many files, take a long rest to let the HDD and
+/// system recover.  Prevents non-stop ingestion during large backlogs.
+pub const THROTTLE_FILE_COUNT: u64 = 700;
+
+/// Duration (in seconds) of the rest period after THROTTLE_FILE_COUNT files.
+/// 5 minutes = 300 seconds.
+pub const THROTTLE_REST_SECS: u64 = 300;

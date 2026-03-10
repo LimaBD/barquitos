@@ -14,6 +14,12 @@ PID_FILE="/mnt/wdblack/ais_ingestor.pid"
 LOG_FILE="/mnt/wdblack/ais_ingestor.log"
 BINARY="$PROJECT_DIR/target/release/ais_ingestor"
 
+# Check if /mnt/wdblack is mounted
+if ! mountpoint -q /mnt/wdblack 2>/dev/null; then
+    echo "❌ /mnt/wdblack is not mounted! Cannot start ingestor."
+    exit 1
+fi
+
 # Check if already running
 if [[ -f "$PID_FILE" ]]; then
     OLD_PID=$(cat "$PID_FILE")

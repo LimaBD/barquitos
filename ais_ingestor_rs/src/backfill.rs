@@ -14,6 +14,8 @@
 
 mod config;
 mod edge_state;
+#[allow(dead_code)]
+mod mount_check;
 mod parser;
 mod schema;
 mod writer;
