@@ -22,7 +22,7 @@ use std::time::Duration;
 use std::io::{BufRead, BufReader};
 
 use chrono::Utc;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 
 use crate::edge_state::EdgeState;
 use crate::parser::{ParsedMessage, StaticRecord};
@@ -32,6 +32,23 @@ use crate::writer::*;
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 fn main() {
+    // ── Check for --debug-file <path> argument ──
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--debug-file") {
+        let file_path = args.get(pos + 1).unwrap_or_else(|| {
+            eprintln!("Usage: ais_ingestor --debug-file <path_to_jsonl>");
+            std::process::exit(1);
+        });
+
+        // Force verbose logging for debug mode
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .format_timestamp_secs()
+            .init();
+
+        run_debug_single_file(file_path);
+        return;
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_secs()
         .init();
@@ -144,6 +161,244 @@ fn main() {
     }
 
     info!("Ingestor stopped.  Edge state tracked {} vessels.", edge.vessel_count());
+}
+
+// ─── Debug: single-file mode ────────────────────────────────────────────────
+//
+// Processes ONE file with verbose output on a single thread.
+// No mount checks, no watchdog, no throttling, no file moves.
+// The file is left in place (not moved to ais_processed/).
+// ────────────────────────────────────────────────────────────────────────────
+
+fn run_debug_single_file(path: &str) {
+    let file_path = PathBuf::from(path);
+    if !file_path.exists() {
+        error!("File not found: {}", file_path.display());
+        std::process::exit(1);
+    }
+
+    info!("═══════════════════════════════════════════════════════════════");
+    info!("  DEBUG MODE — single file, 1 thread, verbose");
+    info!("  File: {}", file_path.display());
+    info!("═══════════════════════════════════════════════════════════════");
+
+    let mut edge = EdgeState::new();
+    let mut pos_buf = PositionBuf::default();
+    let mut draught_buf = DraughtBuf::default();
+    let mut nav_buf = NavStatusBuf::default();
+    let mut dest_buf = DestinationBuf::default();
+    let mut static_buf = VesselStaticBuf::default();
+    let mut name_buf = VesselNameHistoryBuf::default();
+    let mut health = HealthCounters::default();
+
+    let file = fs::File::open(&file_path).unwrap_or_else(|e| {
+        error!("Cannot open file: {e}");
+        std::process::exit(1);
+    });
+    let reader = BufReader::with_capacity(config::BUF_READER_CAPACITY, file);
+
+    let mut line_num: u64 = 0;
+
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("  Line {} read error: {e}", line_num + 1);
+                health.parse_errors += 1;
+                continue;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        line_num += 1;
+        health.total_messages += 1;
+
+        match parser::parse_line(&line) {
+            ParsedMessage::Position(p) => {
+                health.position_reports += 1;
+                health.unique_mmsis.insert(p.mmsi);
+
+                debug!(
+                    "  [L{}] POSITION mmsi={} ts={} lat={:.5} lon={:.5} sog={:?} cog={:?} hdg={:?} rot={:?} nav={:?} name={:?}",
+                    line_num, p.mmsi, p.timestamp_s, p.latitude, p.longitude,
+                    p.sog, p.cog, p.heading, p.rot, p.nav_status, p.ship_name
+                );
+
+                if let Some(status) = p.nav_status {
+                    if let Some((new_s, old_s)) = edge.check_nav_status(p.mmsi, status) {
+                        info!("  [L{}]   EDGE nav_status mmsi={}: {:?} → {}", line_num, p.mmsi, old_s, new_s);
+                        nav_buf.mmsi.push(p.mmsi);
+                        nav_buf.timestamp_s.push(p.timestamp_s);
+                        nav_buf.nav_status.push(new_s);
+                    }
+                }
+
+                if let Some(ref name) = p.ship_name {
+                    if let Some(new_name) = edge.check_ship_name(p.mmsi, name) {
+                        info!("  [L{}]   EDGE ship_name mmsi={}: → {:?}", line_num, p.mmsi, new_name);
+                        name_buf.mmsi.push(p.mmsi);
+                        name_buf.timestamp_s.push(p.timestamp_s);
+                        name_buf.ship_name.push(new_name);
+                    }
+                }
+
+                pos_buf.mmsi.push(p.mmsi);
+                pos_buf.timestamp_s.push(p.timestamp_s);
+                pos_buf.latitude.push(p.latitude);
+                pos_buf.longitude.push(p.longitude);
+                pos_buf.sog.push(p.sog);
+                pos_buf.cog.push(p.cog);
+                pos_buf.heading.push(p.heading);
+                pos_buf.rot.push(p.rot);
+            }
+            ParsedMessage::Static(s) => {
+                health.static_data_reports += 1;
+                health.unique_mmsis.insert(s.mmsi);
+
+                debug!(
+                    "  [L{}] STATIC  mmsi={} ts={} name={:?} call={:?} imo={:?} type={:?} draught={:?} dest={:?} eta={:?}",
+                    line_num, s.mmsi, s.timestamp_s, s.ship_name, s.call_sign,
+                    s.imo_number, s.ship_type, s.draught, s.destination, s.eta_utc
+                );
+
+                process_static_record_debug(s, &mut edge, &mut draught_buf, &mut dest_buf, &mut static_buf, &mut name_buf, &mut health, line_num);
+            }
+            ParsedMessage::Ignored => {
+                debug!("  [L{}] IGNORED", line_num);
+            }
+            ParsedMessage::Error(e) => {
+                health.parse_errors += 1;
+                warn!("  [L{}] PARSE ERROR: {e}", line_num);
+            }
+        }
+    }
+
+    // ── Flush all buffers to Parquet (same as normal mode) ──
+    info!("Flushing buffers to Parquet (lake root: {}) …", config::LAKE_ROOT);
+    let batch_start = Utc::now();
+
+    let pos_count = flush_positions(config::LAKE_ROOT, &mut pos_buf)
+        .unwrap_or_else(|e| { error!("flush_positions failed: {e}"); 0 });
+    let dr_count = flush_draughts(config::LAKE_ROOT, &mut draught_buf)
+        .unwrap_or_else(|e| { error!("flush_draughts failed: {e}"); 0 });
+    let nav_count = flush_nav_statuses(config::LAKE_ROOT, &mut nav_buf)
+        .unwrap_or_else(|e| { error!("flush_nav_statuses failed: {e}"); 0 });
+    let dst_count = flush_destinations(config::LAKE_ROOT, &mut dest_buf)
+        .unwrap_or_else(|e| { error!("flush_destinations failed: {e}"); 0 });
+    let sta_count = flush_vessel_static(config::LAKE_ROOT, &mut static_buf)
+        .unwrap_or_else(|e| { error!("flush_vessel_static failed: {e}"); 0 });
+    let name_count = flush_vessel_name_history(config::LAKE_ROOT, &mut name_buf)
+        .unwrap_or_else(|e| { error!("flush_vessel_name_history failed: {e}"); 0 });
+
+    let batch_end = Utc::now();
+    let window_start_s = batch_start.timestamp();
+    let window_end_s = batch_end.timestamp();
+    if let Err(e) = flush_health(config::LAKE_ROOT, &mut health, window_start_s, window_end_s) {
+        error!("flush_health failed: {e}");
+    }
+
+    // ── Move processed file ──
+    let filename = file_path.file_name().unwrap();
+    let dest = Path::new(config::AIS_PROCESSED_DIR).join(filename);
+    fs::create_dir_all(config::AIS_PROCESSED_DIR).ok();
+    match fs::rename(&file_path, &dest) {
+        Ok(()) => info!("  Moved → {}", dest.display()),
+        Err(e) => {
+            warn!("  rename failed ({e}), trying copy+delete …");
+            match fs::copy(&file_path, &dest) {
+                Ok(_) => {
+                    fs::remove_file(&file_path).ok();
+                    info!("  Copied+deleted → {}", dest.display());
+                }
+                Err(e2) => error!("  Failed to move {}: {e2}", file_path.display()),
+            }
+        }
+    }
+
+    info!("═══════════════════════════════════════════════════════════════");
+    info!("  DEBUG SUMMARY");
+    info!("  Lines read:        {}", line_num);
+    info!("  Total messages:    {}", health.total_messages);
+    info!("  Position reports:  {}", health.position_reports);
+    info!("  Static reports:    {}", health.static_data_reports);
+    info!("  Parse errors:      {}", health.parse_errors);
+    info!("  Unique MMSIs:      {}", health.unique_mmsis.len());
+    info!("  Parquet written: {} positions, {} draughts, {} nav, {} dest, {} static, {} names",
+        pos_count, dr_count, nav_count, dst_count, sta_count, name_count);
+    info!("  Edge state vessels: {}", edge.vessel_count());
+    info!("═══════════════════════════════════════════════════════════════");
+}
+
+/// Like process_static_record but with verbose debug logging for each edge change.
+fn process_static_record_debug(
+    s: StaticRecord,
+    edge: &mut EdgeState,
+    draught_buf: &mut DraughtBuf,
+    dest_buf: &mut DestinationBuf,
+    static_buf: &mut VesselStaticBuf,
+    name_buf: &mut VesselNameHistoryBuf,
+    _health: &mut HealthCounters,
+    line_num: u64,
+) {
+    if let Some(ref name) = s.ship_name {
+        if let Some(new_name) = edge.check_ship_name(s.mmsi, name) {
+            info!("  [L{}]   EDGE ship_name mmsi={}: → {:?}", line_num, s.mmsi, new_name);
+            name_buf.mmsi.push(s.mmsi);
+            name_buf.timestamp_s.push(s.timestamp_s);
+            name_buf.ship_name.push(new_name);
+        }
+    }
+
+    if let Some(draught) = s.draught {
+        if let Some((new_d, old_d)) = edge.check_draught(s.mmsi, draught) {
+            info!("  [L{}]   EDGE draught mmsi={}: {:?} → {}", line_num, s.mmsi, old_d, new_d);
+            draught_buf.mmsi.push(s.mmsi);
+            draught_buf.timestamp_s.push(s.timestamp_s);
+            draught_buf.draught.push(new_d);
+        }
+    }
+
+    if let Some(ref dest) = s.destination {
+        if let Some((new_dest, old_dest)) = edge.check_destination(s.mmsi, dest) {
+            info!("  [L{}]   EDGE destination mmsi={}: {:?} → {:?}", line_num, s.mmsi, old_dest, new_dest);
+            dest_buf.mmsi.push(s.mmsi);
+            dest_buf.timestamp_s.push(s.timestamp_s);
+            dest_buf.destination.push(new_dest);
+            dest_buf.eta_utc.push(s.eta_utc);
+        }
+    }
+
+    let length_overall = match (s.dim_a, s.dim_b) {
+        (Some(a), Some(b)) if (a + b) > 0 => Some(a + b),
+        _ => None,
+    };
+    let beam = match (s.dim_c, s.dim_d) {
+        (Some(c), Some(d)) if (c + d) > 0 => Some(c + d),
+        _ => None,
+    };
+
+    let key = edge_state::VesselStaticKey {
+        call_sign: s.call_sign.clone(),
+        imo_number: s.imo_number,
+        ship_type: s.ship_type,
+        length_overall,
+        beam,
+    };
+    if edge.check_vessel_static(s.mmsi, key) {
+        info!(
+            "  [L{}]   EDGE vessel_static mmsi={}: call={:?} imo={:?} type={:?} len={:?} beam={:?}",
+            line_num, s.mmsi, s.call_sign, s.imo_number, s.ship_type, length_overall, beam
+        );
+        static_buf.mmsi.push(s.mmsi);
+        static_buf.timestamp_s.push(s.timestamp_s);
+        static_buf.call_sign.push(s.call_sign);
+        static_buf.imo_number.push(s.imo_number);
+        static_buf.ship_type.push(s.ship_type);
+        static_buf.length_overall.push(length_overall);
+        static_buf.beam.push(beam);
+    }
 }
 
 /// Sleep for `secs` seconds, but check shutdown flag every second.
