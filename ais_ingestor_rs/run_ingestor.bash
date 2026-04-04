@@ -48,7 +48,7 @@ mkdir -p /mnt/wdblack/trading_lake
 # ⭐ ionice -c3 = "idle" I/O class — only uses disk when nothing else needs it
 # ⭐ nice -n 10  = lower CPU priority so collector + shell stay responsive
 echo "🚀 Starting AIS ingestor daemon (low I/O + CPU priority) …"
-RUST_LOG=info nohup ionice -c3 nice -n 10 "$BINARY" >> "$LOG_FILE" 2>&1 &
+RUST_LOG=info nohup ionice -c3 nice -n 19 "$BINARY" >> "$LOG_FILE" 2>&1 &
 INGESTOR_PID=$!
 
 echo "$INGESTOR_PID" > "$PID_FILE"

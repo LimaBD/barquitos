@@ -27,23 +27,22 @@ pub const AIS_PROCESSED_DIR: &str = "/mnt/wdblack/ais_processed";
 pub const SCAN_INTERVAL_SECS: u64 = 30;
 
 /// How many JSONL files to ingest per micro-batch before flushing to Parquet.
-/// With 16 GB RAM we can afford larger batches (15 files ≈ ~200 MB).
-pub const FILES_PER_BATCH: usize = 15;
+/// Kept small so the HDD is free for the collector and other programs.
+pub const FILES_PER_BATCH: usize = 3;
 
 /// Maximum number of position rows to buffer before forcing an early flush.
-/// 500 000 rows ≈ ~100 MB of Arrow buffers — comfortable for 16 GB.
-pub const MAX_POSITION_ROWS_BEFORE_FLUSH: usize = 500_000;
+/// 200 000 rows ≈ ~40 MB of Arrow buffers — smaller batches = less pressure.
+pub const MAX_POSITION_ROWS_BEFORE_FLUSH: usize = 200_000;
 
 /// Milliseconds to sleep between processing individual files within a batch.
-/// Gives the HDD head a moment to service other I/O requests.
-pub const INTER_FILE_SLEEP_MS: u64 = 200;
+/// 3 seconds between files — generous breathing room for the HDD.
+pub const INTER_FILE_SLEEP_MS: u64 = 3_000;
 
 /// ⭐ MANDATORY COOLDOWN (seconds) after every batch — even when files remain.
-/// This is the KEY fix: without it, the ingestor runs a non-stop tight loop
-/// when there is a large backlog (you have 5 000+ files), starving the
-/// collector, shell, and every other process of HDD I/O.
-/// 3 seconds guarantees other processes can read/write the disk.
-pub const COOLDOWN_AFTER_BATCH_SECS: u64 = 3;
+/// With 3 files/batch + 50s cooldown ≈ 3 files/minute.
+/// The collector writes 1 file/minute, so we catch up gradually without
+/// starving other processes of HDD I/O.
+pub const COOLDOWN_AFTER_BATCH_SECS: u64 = 50;
 
 /// Parquet writer settings ────────────────────────────────────────────────
 
@@ -79,8 +78,8 @@ pub const WATCHDOG_INTERVAL_SECS: u64 = 60;
 // ─── File-Count Throttling ──────────────────────────────────────────────
 
 /// After processing this many files, take a long rest to let the HDD and
-/// system recover.  Prevents non-stop ingestion during large backlogs.
-pub const THROTTLE_FILE_COUNT: u64 = 700;
+/// system recover.  ~60 files ≈ 20 batches ≈ ~20 minutes of work.
+pub const THROTTLE_FILE_COUNT: u64 = 60;
 
 /// Duration (in seconds) of the rest period after THROTTLE_FILE_COUNT files.
 /// 5 minutes = 300 seconds.
