@@ -162,45 +162,74 @@ async fn collect(
     let (mut sink, mut source) = ws_stream.split();
     sink.send(Message::Text(build_subscription(api_key, cfg))).await?;
 
+    if cfg.collector.post_subscribe_delay_secs > 0 {
+        tokio::time::sleep(Duration::from_secs(cfg.collector.post_subscribe_delay_secs)).await;
+    }
+
     let mut total: u64 = 0;
     let mut mount_fails: u32 = 0;
     const MAX_MOUNT_FAILS: u32 = 5;
 
-    while let Some(msg_result) = source.next().await {
+    // Keepalive ping — mirrors the Python fix (ping_interval=60, ping_timeout=60).
+    // Also ensures any queued Pong responses from received Pings get flushed
+    // (required because the stream is split: the sink doesn't drain automatically).
+    let mut ping_timer = tokio::time::interval(Duration::from_secs(cfg.collector.ping_interval_secs));
+    ping_timer.tick().await; // skip the immediate first tick
+
+    loop {
         if SHUTDOWN.load(Ordering::Relaxed) { break; }
 
-        let msg = msg_result?;
-        let text = match msg {
-            Message::Text(t)           => t,
-            Message::Binary(b)         => String::from_utf8_lossy(&b).to_string(),
-            Message::Ping(_) | Message::Pong(_) => continue,
-            Message::Close(_)          => { info!("Server closed connection."); break; }
-            _                          => continue,
-        };
+        tokio::select! {
+            biased;
 
-        match writer.write(&text) {
-            Ok(true) => {
-                mount_fails = 0;
-                total += 1;
-                if total % cfg.collector.log_every_n_messages == 0 {
-                    info!("Messages received: {total}");
+            msg_result = source.next() => {
+                let msg = match msg_result {
+                    Some(Ok(m))  => m,
+                    Some(Err(e)) => return Err(e.into()),
+                    None         => { info!("Stream ended."); break; }
+                };
+
+                let text = match msg {
+                    Message::Text(t)           => t,
+                    Message::Binary(b)         => String::from_utf8_lossy(&b).to_string(),
+                    Message::Ping(payload)     => {
+                        // Explicit pong — split stream won't auto-flush from the read side.
+                        sink.send(Message::Pong(payload)).await?;
+                        continue;
+                    }
+                    Message::Pong(_)           => continue,
+                    Message::Close(_)          => { info!("Server closed connection."); break; }
+                    _                          => continue,
+                };
+
+                match writer.write(&text) {
+                    Ok(true) => {
+                        mount_fails = 0;
+                        total += 1;
+                        if total % cfg.collector.log_every_n_messages == 0 {
+                            info!("Messages received: {total}");
+                        }
+                    }
+                    Ok(false) => {
+                        mount_fails += 1;
+                        warn!("Mount unhealthy — dropped message ({mount_fails}/{MAX_MOUNT_FAILS})");
+                        if mount_fails >= MAX_MOUNT_FAILS {
+                            error!("Too many mount failures. Exiting.");
+                            std::process::exit(1);
+                        }
+                    }
+                    Err(e) => {
+                        mount_fails += 1;
+                        error!("Write error: {e} ({mount_fails}/{MAX_MOUNT_FAILS})");
+                        if mount_fails >= MAX_MOUNT_FAILS {
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
-            Ok(false) => {
-                // Mount unhealthy — message dropped
-                mount_fails += 1;
-                warn!("Mount unhealthy — dropped message ({mount_fails}/{MAX_MOUNT_FAILS})");
-                if mount_fails >= MAX_MOUNT_FAILS {
-                    error!("Too many mount failures. Exiting.");
-                    std::process::exit(1);
-                }
-            }
-            Err(e) => {
-                mount_fails += 1;
-                error!("Write error: {e} ({mount_fails}/{MAX_MOUNT_FAILS})");
-                if mount_fails >= MAX_MOUNT_FAILS {
-                    std::process::exit(1);
-                }
+
+            _ = ping_timer.tick() => {
+                sink.send(Message::Ping(Default::default())).await?;
             }
         }
     }

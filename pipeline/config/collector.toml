@@ -11,7 +11,7 @@
 
 [collector]
 # API key — can also be overridden with AISSTREAM_API_KEY env var
-api_key                  = "9ce24db073071bf1078b798e22e44bd412191101"
+api_key                  = "449005a7bfaf5befb9aebb15c70c3a20658b9a71"
 ws_url                   = "wss://stream.aisstream.io/v0/stream"
 
 # Bounding boxes: array of [[SW_lat, SW_lon], [NE_lat, NE_lon]]
@@ -32,6 +32,14 @@ mount_point              = ""
 log_every_n_messages     = 1000
 reconnect_delay_secs     = 5
 max_reconnect_delay_secs = 300
+
+# Seconds to wait after sending the subscription before reading messages.
+# Gives aisstream.io time to process the subscription request.
+post_subscribe_delay_secs = 3
+
+# How often (seconds) to send a WebSocket Ping to keep the connection alive.
+# Mirrors the Python websockets fix (ping_interval=60, ping_timeout=60).
+ping_interval_secs = 60
 
 # ─── Mount / Watchdog ─────────────────────────────────────────────────────────
 # (Only relevant if mount_point is non-empty above)

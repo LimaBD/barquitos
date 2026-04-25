@@ -32,10 +32,21 @@ pub struct CollectorConfig {
     /// Mount point to verify before each write.  Empty = skip check (for local disk).
     #[serde(default)]
     pub mount_point:              String,
-    pub log_every_n_messages:     u64,
-    pub reconnect_delay_secs:     u64,
-    pub max_reconnect_delay_secs: u64,
+    pub log_every_n_messages:       u64,
+    pub reconnect_delay_secs:       u64,
+    pub max_reconnect_delay_secs:   u64,
+    /// Seconds to wait after sending the subscription before reading messages.
+    /// Gives the aisstream.io API time to process the subscription.
+    #[serde(default = "default_post_subscribe_delay")]
+    pub post_subscribe_delay_secs:  u64,
+    /// How often (seconds) to send a WebSocket Ping to keep the connection alive.
+    /// Should match the server's idle-timeout; 60s mirrors the Python websockets fix.
+    #[serde(default = "default_ping_interval")]
+    pub ping_interval_secs: u64,
 }
+
+fn default_post_subscribe_delay() -> u64 { 3 }
+fn default_ping_interval() -> u64 { 60 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct MoverConfig {
