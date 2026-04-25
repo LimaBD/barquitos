@@ -28,6 +28,22 @@ SERVICE_USER="server"
 echo "══ Barquitos AIS Pipeline Installer ══"
 echo "  Repo: $REPO_DIR"
 
+# ── 0. System dependencies ────────────────────────────────────────────────────
+echo ""
+echo "▶ Checking system dependencies …"
+MISSING_PKGS=()
+command -v pkg-config &>/dev/null || MISSING_PKGS+=(pkg-config)
+dpkg -s libssl-dev &>/dev/null 2>&1     || MISSING_PKGS+=(libssl-dev)
+
+if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
+    echo "  Installing missing packages: ${MISSING_PKGS[*]}"
+    apt-get update -qq
+    apt-get install -y "${MISSING_PKGS[@]}"
+    echo "  Dependencies installed."
+else
+    echo "  All dependencies present."
+fi
+
 # ── 1. Build ──────────────────────────────────────────────────────────────────
 echo ""
 echo "▶ Building release binaries (this may take a few minutes) …"
