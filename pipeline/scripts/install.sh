@@ -47,6 +47,19 @@ fi
 # ── 1. Build ──────────────────────────────────────────────────────────────────
 echo ""
 echo "▶ Building release binaries (this may take a few minutes) …"
+
+# When run via sudo, ~/.cargo/bin is not in PATH and RUSTUP_HOME is wrong.
+if [ -n "${SUDO_USER:-}" ]; then
+    USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    export CARGO_HOME="$USER_HOME/.cargo"
+    export RUSTUP_HOME="$USER_HOME/.rustup"
+    export PATH="$CARGO_HOME/bin:$PATH"
+fi
+if ! command -v cargo &>/dev/null; then
+    echo "  ✗ cargo not found. Install Rust: https://rustup.rs"
+    exit 1
+fi
+
 cd "$REPO_DIR"
 cargo build --release --workspace
 
@@ -166,9 +179,9 @@ echo "  sudo journalctl -u ais-collector -f"
 echo "  sudo journalctl -u ais-ingestor -f"
 echo "  sudo journalctl -u ais-mover -f"
 echo ""
-echo "Config file:  $CONFIG_DEST"
+echo "Config dir:   $CONFIG_DIR"
 echo "  Edit it any time — no recompile needed, just restart the service:"
 echo "  sudo systemctl restart ais-ingestor"
 echo ""
 echo "Backfill historical data:"
-echo "  BARQUITOS_CONFIG=$CONFIG_DEST ais_backfill /path/to/jsonl/files"
+echo "  BARQUITOS_CONFIG=$CONFIG_DIR/ingestor.toml ais_backfill /path/to/jsonl/files"
