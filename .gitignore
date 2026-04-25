@@ -2,6 +2,14 @@
 # Barquitos — .gitignore
 # ============================================================================
 
+# ----- Rust ------------------------------------------------------------------
+# Workspace build outputs (pipeline/ is the Cargo workspace root)
+pipeline/target/
+pipeline/crates/*/target/
+# Leftover root-level target/ from before the pipeline/ reorganisation
+/target/
+**/*.rs.bk
+
 # ----- Python ---------------------------------------------------------------
 __pycache__/
 *.py[cod]
@@ -17,44 +25,40 @@ build/
 venv/
 env/
 
-# ----- IDE / Editor ---------------------------------------------------------
-.vscode/
+# ----- Node / Frontend -------------------------------------------------------
+node_modules/
+dashboard/static/assets/
+
+# ----- IDE / Editor ----------------------------------------------------------
+.vscode/settings.json
 .idea/
 *.swp
 *.swo
 *~
 
-# ----- Environment / Secrets ------------------------------------------------
+# ----- Environment / Secrets -------------------------------------------------
 .env
+.env.*
+secrets.toml
+# config.toml holds non-secret defaults and IS committed;
+# use config.local.toml for machine-specific overrides (not committed)
+config.local.toml
+*.toml.old
 
-# ----- Rust ------------------------------------------------------------------
-ais_ingestor_rs/target/
-ais_collector_rs/target/
-
-# ----- Data (large / generated) ---------------------------------------------
-# Raw AIS JSONL files (collected data — too large for git)
-ais_collector_rs/data_samples/
-ais_ingestor_rs/test_data/
+# ----- Data (large / generated) ----------------------------------------------
 *.jsonl
-
-# Database files
+*.parquet
+*.arrow
 *.db
 *.db-wal
 *.db-shm
-
-# Parquet Data Lake (lives on /mnt/wdblack/trading_lake/)
-*.parquet
 trading_lake/
-
-# Processed / backup data
 ais_processed/
 
-# PID / log files from ingestor daemon
+# ----- Logs & PID files ------------------------------------------------------
+*.log
 *.pid
-ais_ingestor_rs/*.log
 
-# ----- Node / Frontend ------------------------------------------------------
-node_modules/
 dashboard/frontend/dist/
 
 # ----- OS -------------------------------------------------------------------

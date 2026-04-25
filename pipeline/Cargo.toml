@@ -1,0 +1,59 @@
+# ─── Barquitos AIS Pipeline — Cargo Workspace ────────────────────────────────
+#
+# Three binaries, one shared library, one config file.
+#
+#  ais_collector  — WebSocket → JSONL on system disk (/home/server/.barquitos/ais)
+#  ais_mover      — Hourly: system disk → WD Black (/mnt/wdblack/ais)
+#  ais_ingestor   — JSONL on WD Black → Parquet Data Lake
+#  ais_backfill   — One-shot historical backfill tool (part of ingestor crate)
+#
+# All share barquitos-common: config loading, mount checks, safe I/O.
+#
+# Build everything:   cargo build --release
+# Build a single bin: cargo build --release -p ais-ingestor --bin ais_ingestor
+# Run with config:    BARQUITOS_CONFIG=/etc/barquitos/config.toml ./ais_ingestor
+# ─────────────────────────────────────────────────────────────────────────────
+
+[workspace]
+members = [
+    "crates/common",
+    "crates/collector",
+    "crates/ingestor",
+    "crates/mover",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+
+# ── Shared dependency versions (override per-crate allowed) ──────────────────
+[workspace.dependencies]
+barquitos-common = { path = "crates/common" }
+
+tokio           = { version = "1",    features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util    = "0.3"
+
+serde           = { version = "1",  features = ["derive"] }
+serde_json      = "1"
+toml            = "0.8"
+
+chrono          = { version = "0.4", features = ["serde"] }
+
+log             = "0.4"
+env_logger      = "0.11"
+
+ctrlc           = { version = "3", features = ["termination"] }
+
+arrow-array     = "54"
+arrow-schema    = "54"
+arrow-select    = "54"
+arrow-ord       = "54"
+parquet         = { version = "54", default-features = false, features = ["arrow", "snap", "zstd"] }
+
+[profile.release]
+opt-level     = "s"
+lto           = true
+codegen-units = 1
+strip         = true

@@ -1,0 +1,59 @@
+# ─── AIS Ingestor — Runtime Configuration ────────────────────────────────────
+#
+# Edit this file to change any setting without recompiling.
+#
+# Config path resolution order (first match wins):
+#   1. --config <path>                  CLI argument
+#   2. BARQUITOS_INGESTOR_CONFIG        environment variable
+#   3. /etc/barquitos/ingestor.toml     system install path
+#   4. ./config/ingestor.toml           cwd-relative (run from pipeline/)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[ingestor]
+input_dir     = "/mnt/wdblack/ais"
+processed_dir = "/mnt/wdblack/ais_processed"
+quarantine_dir = "/mnt/wdblack/ais_quarantine"
+lake_root     = "/mnt/wdblack/trading_lake"
+mount_point   = "/mnt/wdblack"
+
+# How long to wait when no files are found before scanning again (seconds)
+scan_interval_secs = 30
+
+# Files to process per micro-batch (keeps HDD pressure low)
+files_per_batch = 3
+
+# Sleep between individual files within a batch (milliseconds)
+inter_file_sleep_ms = 3000
+
+# Mandatory cooldown after every batch (seconds)
+# With 3 files/batch + 50s cooldown ≈ 3 files/minute; collector writes ~1/min
+cooldown_after_batch_secs = 50
+
+# Flush to Parquet early if position buffer exceeds this row count
+max_position_rows_before_flush = 200000
+
+# Throttle: after this many files, take a long rest
+throttle_file_count = 60
+throttle_rest_secs  = 300
+
+# Anti-crash: max seconds to wait for a single file read.
+# If a bad sector causes the read to hang, the file is quarantined.
+file_read_timeout_secs = 60
+
+# ─── Parquet Writer ───────────────────────────────────────────────────────────
+[parquet]
+row_group_size        = 65536
+data_page_size        = 262144   # 256 KB
+dict_page_size        = 524288   # 512 KB
+log_every_n_messages  = 100000
+buf_reader_capacity   = 262144   # 256 KB BufReader
+
+# ─── Mount / Watchdog ─────────────────────────────────────────────────────────
+[mount]
+# Seconds to wait for a stat/readdir on the mount point before declaring timeout
+check_timeout_secs     = 30
+# How often the background watchdog checks mount health
+watchdog_interval_secs = 60
+# Max retries on startup before giving up
+max_retries            = 10
+retry_interval_secs    = 30

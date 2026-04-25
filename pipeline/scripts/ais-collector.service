@@ -1,0 +1,34 @@
+[Unit]
+Description=AIS Data Collector (barquitos)
+Documentation=https://github.com/barquitos
+After=network-online.target
+Wants=network-online.target
+# Restart on crash — systemd will throttle if it keeps failing
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=server
+Group=server
+
+# Config: /etc/barquitos/config.toml  (see scripts/install.sh)
+Environment="BARQUITOS_CONFIG=/etc/barquitos/config.toml"
+# Uncomment to override API key without editing the config file:
+# Environment="AISSTREAM_API_KEY=your_key_here"
+
+ExecStart=/usr/local/bin/ais_collector
+Restart=always
+RestartSec=10s
+
+# Resource limits — prevent runaway memory or CPU
+MemoryMax=512M
+CPUQuota=50%
+
+# Logging goes to journald automatically
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ais-collector
+
+[Install]
+WantedBy=multi-user.target

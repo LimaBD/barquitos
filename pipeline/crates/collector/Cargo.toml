@@ -1,0 +1,20 @@
+[package]
+name        = "ais-collector"
+version.workspace = true
+edition.workspace = true
+description = "AIS WebSocket collector — streams from AISstream.io and writes JSONL to local disk"
+
+[[bin]]
+name = "ais_collector"
+path = "src/main.rs"
+
+[dependencies]
+barquitos-common  = { workspace = true }
+
+tokio             = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util      = { workspace = true }
+serde_json        = { workspace = true }
+log               = { workspace = true }
+env_logger        = { workspace = true }
+chrono            = { workspace = true }

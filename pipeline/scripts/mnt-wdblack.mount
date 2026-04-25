@@ -1,0 +1,12 @@
+[Unit]
+Description=Mount WD Black drive at /mnt/wdblack
+After=local-fs.target
+
+[Mount]
+What=/dev/sda1
+Where=/mnt/wdblack
+Type=ext4
+Options=defaults,noatime,nodiratime
+
+[Install]
+WantedBy=multi-user.target

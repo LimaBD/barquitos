@@ -1,0 +1,17 @@
+[package]
+name        = "ais-mover"
+version.workspace = true
+edition.workspace = true
+description = "Hourly file mover — moves collected JSONL from system disk to WD Black for ingestion"
+
+[[bin]]
+name = "ais_mover"
+path = "src/main.rs"
+
+[dependencies]
+barquitos-common = { workspace = true }
+
+log        = { workspace = true }
+env_logger = { workspace = true }
+chrono     = { workspace = true }
+ctrlc      = { workspace = true }

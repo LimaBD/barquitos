@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Stop the AIS Collector gracefully (SIGTERM → SIGKILL after 10 s).
+set -euo pipefail
+
+PID_FILE="$HOME/.barquitos/run/collector.pid"
+NAME="Collector"
+
+if [ ! -f "$PID_FILE" ]; then
+    echo "$NAME is not running (no PID file found)."
+    exit 0
+fi
+
+PID=$(cat "$PID_FILE")
+
+if ! kill -0 "$PID" 2>/dev/null; then
+    echo "$NAME is not running (stale PID $PID). Removing PID file."
+    rm -f "$PID_FILE"
+    exit 0
+fi
+
+echo "Stopping $NAME (PID $PID) …"
+kill -TERM "$PID"
+
+# Wait up to 10 s for graceful shutdown
+for i in $(seq 1 10); do
+    sleep 1
+    if ! kill -0 "$PID" 2>/dev/null; then
+        rm -f "$PID_FILE"
+        echo "$NAME stopped."
+        exit 0
+    fi
+done
+
+echo "$NAME did not stop in 10 s — sending SIGKILL …"
+kill -KILL "$PID" 2>/dev/null || true
+rm -f "$PID_FILE"
+echo "$NAME killed."

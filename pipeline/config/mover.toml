@@ -1,0 +1,38 @@
+# ─── AIS Mover — Runtime Configuration ───────────────────────────────────────
+#
+# Edit this file to change any setting without recompiling.
+#
+# Config path resolution order (first match wins):
+#   1. --config <path>                  CLI argument
+#   2. BARQUITOS_MOVER_CONFIG           environment variable
+#   3. /etc/barquitos/mover.toml        system install path
+#   4. ./config/mover.toml              cwd-relative (run from pipeline/)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[mover]
+source_dir        = "/home/server/.barquitos/ais"
+dest_dir          = "/mnt/wdblack/ais"
+dest_mount_point  = "/mnt/wdblack"
+
+# How often to move files (seconds). 3600 = 1 hour
+interval_secs = 3600
+
+# Only move files that are at least this old (seconds).
+# Prevents moving a file the collector is still writing to.
+min_file_age_secs = 120
+
+# Anti-crash: max seconds to wait for a single file copy.
+# If a bad sector causes the copy to hang beyond this, the file is quarantined.
+file_copy_timeout_secs = 60
+
+quarantine_dir = "/home/server/.barquitos/ais_quarantine"
+
+# ─── Mount / Watchdog ─────────────────────────────────────────────────────────
+[mount]
+# Seconds to wait for a stat/readdir on the mount point before declaring timeout
+check_timeout_secs     = 30
+# How often the background watchdog checks mount health
+watchdog_interval_secs = 60
+# Max retries on startup before giving up
+max_retries            = 10
+retry_interval_secs    = 30

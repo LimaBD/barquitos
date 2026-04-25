@@ -1,0 +1,45 @@
+# ─── AIS Collector — Runtime Configuration ───────────────────────────────────
+#
+# Edit this file to change any setting without recompiling.
+#
+# Config path resolution order (first match wins):
+#   1. --config <path>                  CLI argument
+#   2. BARQUITOS_COLLECTOR_CONFIG       environment variable
+#   3. /etc/barquitos/collector.toml    system install path
+#   4. ./config/collector.toml          cwd-relative (run from pipeline/)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[collector]
+# API key — can also be overridden with AISSTREAM_API_KEY env var
+api_key                  = "9ce24db073071bf1078b798e22e44bd412191101"
+ws_url                   = "wss://stream.aisstream.io/v0/stream"
+
+# Bounding boxes: array of [[SW_lat, SW_lon], [NE_lat, NE_lon]]
+# Global coverage:
+bounding_boxes           = [[[-90.0, -180.0], [90.0, 180.0]]]
+
+# Leave empty to receive all vessels / all message types
+filter_mmsi              = []
+filter_message_types     = []
+
+# Output on the SYSTEM DISK (fast, local, always available)
+output_dir               = "/home/server/.barquitos/ais"
+
+# Set to a path to enable mount check before every write.
+# Leave empty to skip — not needed when writing to the system disk.
+mount_point              = ""
+
+log_every_n_messages     = 1000
+reconnect_delay_secs     = 5
+max_reconnect_delay_secs = 300
+
+# ─── Mount / Watchdog ─────────────────────────────────────────────────────────
+# (Only relevant if mount_point is non-empty above)
+[mount]
+# Seconds to wait for a stat/readdir on the mount point before declaring timeout
+check_timeout_secs      = 30
+# How often the background watchdog checks mount health
+watchdog_interval_secs  = 60
+# Max retries on startup before giving up
+max_retries             = 10
+retry_interval_secs     = 30

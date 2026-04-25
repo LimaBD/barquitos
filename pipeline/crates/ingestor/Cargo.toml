@@ -1,0 +1,29 @@
+[package]
+name        = "ais-ingestor"
+version.workspace = true
+edition.workspace = true
+description = "AIS JSONL → Parquet Bronze layer ingestor with anti-crash file protection"
+
+[[bin]]
+name = "ais_ingestor"
+path = "src/main.rs"
+
+[[bin]]
+name = "ais_backfill"
+path = "src/backfill.rs"
+
+[dependencies]
+barquitos-common = { workspace = true }
+
+arrow-array  = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
+arrow-ord    = { workspace = true }
+parquet      = { workspace = true }
+
+chrono       = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+log          = { workspace = true }
+env_logger   = { workspace = true }
+ctrlc        = { workspace = true }

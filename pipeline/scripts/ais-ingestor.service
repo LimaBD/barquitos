@@ -1,0 +1,29 @@
+[Unit]
+Description=AIS Data Lake Ingestor — JSONL → Parquet (barquitos)
+Documentation=https://github.com/barquitos
+After=mnt-wdblack.mount
+Requires=mnt-wdblack.mount
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=server
+Group=server
+
+Environment="BARQUITOS_CONFIG=/etc/barquitos/config.toml"
+
+ExecStart=/usr/local/bin/ais_ingestor
+Restart=always
+# The ingestor exits itself if the disk hangs (watchdog), so restart quickly
+RestartSec=15s
+
+MemoryMax=2G
+CPUQuota=75%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ais-ingestor
+
+[Install]
+WantedBy=multi-user.target

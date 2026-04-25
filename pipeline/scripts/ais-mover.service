@@ -1,0 +1,29 @@
+[Unit]
+Description=AIS File Mover — system disk → WD Black (barquitos)
+Documentation=https://github.com/barquitos
+# Must run after the WD Black is mounted
+After=mnt-wdblack.mount network.target
+Requires=mnt-wdblack.mount
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=server
+Group=server
+
+Environment="BARQUITOS_CONFIG=/etc/barquitos/config.toml"
+
+ExecStart=/usr/local/bin/ais_mover
+Restart=always
+RestartSec=30s
+
+MemoryMax=256M
+CPUQuota=25%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ais-mover
+
+[Install]
+WantedBy=multi-user.target

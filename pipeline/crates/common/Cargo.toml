@@ -1,0 +1,11 @@
+[package]
+name    = "barquitos-common"
+version.workspace = true
+edition.workspace = true
+description = "Shared config, mount checks, and safe I/O utilities for the Barquitos AIS pipeline"
+
+[dependencies]
+serde  = { workspace = true }
+toml   = { workspace = true }
+log    = { workspace = true }
+chrono = { workspace = true }
