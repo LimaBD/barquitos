@@ -85,6 +85,7 @@ for name in collector ingestor mover; do
         cp "$dst" "${dst}.bak.$(date +%Y%m%d_%H%M%S)"
     fi
     cp "$src" "$dst"
+    chown root:"$SERVICE_USER" "$dst"
     chmod 640 "$dst"
     echo "  Installed: $dst"
 done
