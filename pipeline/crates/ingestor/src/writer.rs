@@ -197,7 +197,12 @@ fn write_or_append(
     batch: RecordBatch,
     props: WriterProperties,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(p) = path.parent() { fs::create_dir_all(p)?; }
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+
+    // Write to a sibling .tmp file first, then atomically rename over the target.
+    // This prevents DuckDB from reading a half-written parquet file.
+    let tmp_path = path.with_extension("parquet.tmp");
 
     if path.exists() {
         let rf = fs::File::open(path)?;
@@ -205,16 +210,17 @@ fn write_or_append(
             .build()?;
         let mut batches: Vec<RecordBatch> = reader.collect::<Result<Vec<_>, _>>()?;
         batches.push(batch);
-        let file = fs::File::create(path)?;
+        let file = fs::File::create(&tmp_path)?;
         let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
         for b in &batches { w.write(b)?; }
         w.close()?;
     } else {
-        let file = fs::File::create(path)?;
+        let file = fs::File::create(&tmp_path)?;
         let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
         w.write(&batch)?;
         w.close()?;
     }
+    fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
@@ -224,11 +230,14 @@ fn write_fresh(
     batch: RecordBatch,
     props: WriterProperties,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(p) = path.parent() { fs::create_dir_all(p)?; }
-    let file = fs::File::create(path)?;
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let tmp_path = path.with_extension("parquet.tmp");
+    let file = fs::File::create(&tmp_path)?;
     let mut w = ArrowWriter::try_new(file, schema, Some(props))?;
     w.write(&batch)?;
     w.close()?;
+    fs::rename(&tmp_path, path)?;
     Ok(())
 }
 

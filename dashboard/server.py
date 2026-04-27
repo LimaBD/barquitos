@@ -32,7 +32,10 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from dashboard.config import LAKE_ROOT, HOST, PORT
+try:
+    from dashboard.config import LAKE_ROOT, HOST, PORT
+except ModuleNotFoundError:
+    from config import LAKE_ROOT, HOST, PORT
 
 # ── globals ────────────────────────────────────────────────────────────────
 _conn: duckdb.DuckDBPyConnection | None = None
@@ -61,10 +64,16 @@ def _get_conn() -> duckdb.DuckDBPyConnection:
 def _q(sql: str, params: list | None = None) -> list[dict]:
     """Run a query and return a list of dicts."""
     conn = _get_conn()
-    if params:
-        result = conn.execute(sql, params)
-    else:
-        result = conn.execute(sql)
+    try:
+        if params:
+            result = conn.execute(sql, params)
+        else:
+            result = conn.execute(sql)
+    except duckdb.InvalidInputException as e:
+        # Corrupt / truncated parquet file — log and return empty result
+        import logging
+        logging.getLogger("uvicorn.error").warning("Skipping bad parquet file: %s", e)
+        return []
     columns = [desc[0] for desc in result.description]
     rows = result.fetchall()
     return [dict(zip(columns, row)) for row in rows]
@@ -174,8 +183,8 @@ async def time_range():
         raise HTTPException(404, "No position data")
     row = _q1(f"""
         SELECT
-            epoch(MIN(timestamp_utc))::BIGINT AS ts_min,
-            epoch(MAX(timestamp_utc))::BIGINT AS ts_max
+            MIN(timestamp_utc) AS ts_min,
+            MAX(timestamp_utc) AS ts_max
         FROM read_parquet({POS_GLOB}, hive_partitioning=true)
     """)
     if row is None or row["ts_min"] is None:
@@ -192,7 +201,7 @@ async def coverage(
         return []
     rows = _q(f"""
         SELECT
-            (epoch(timestamp_utc)::BIGINT / $1) * $1 AS bucket_start,
+            (timestamp_utc / $1) * $1 AS bucket_start,
             COUNT(*) AS cnt
         FROM read_parquet({POS_GLOB}, hive_partitioning=true)
         GROUP BY bucket_start
@@ -224,16 +233,16 @@ async def positions_at(
         WITH candidates AS (
             SELECT
                 p.mmsi,
-                epoch(p.timestamp_utc)::BIGINT AS timestamp_utc,
+                p.timestamp_utc,
                 p.latitude,
                 p.longitude,
                 p.speed_over_ground,
                 p.course_over_ground,
                 p.true_heading,
-                ABS(epoch(p.timestamp_utc)::BIGINT - $1) AS diff_seconds,
-                ROW_NUMBER() OVER (PARTITION BY p.mmsi ORDER BY ABS(epoch(p.timestamp_utc)::BIGINT - $1)) AS rn
+                ABS(p.timestamp_utc - $1) AS diff_seconds,
+                ROW_NUMBER() OVER (PARTITION BY p.mmsi ORDER BY ABS(p.timestamp_utc - $1)) AS rn
             FROM read_parquet({POS_GLOB}, hive_partitioning=true) p
-            WHERE epoch(p.timestamp_utc)::BIGINT BETWEEN $2 AND $3
+            WHERE p.timestamp_utc BETWEEN $2 AND $3
         )
         SELECT
             c.mmsi,
@@ -332,8 +341,8 @@ async def vessel_detail(mmsi: int):
         vessel = _q1(f"""
             SELECT mmsi, call_sign, imo_number, ship_type,
                    length_overall, beam,
-                   epoch(MIN(timestamp_utc))::BIGINT AS first_seen_utc,
-                   epoch(MAX(timestamp_utc))::BIGINT AS last_seen_utc
+                   MIN(timestamp_utc) AS first_seen_utc,
+                   MAX(timestamp_utc) AS last_seen_utc
             FROM read_parquet({STATIC_GLOB})
             WHERE mmsi = $1
             GROUP BY mmsi, call_sign, imo_number, ship_type,
@@ -349,8 +358,8 @@ async def vessel_detail(mmsi: int):
                 SELECT mmsi, NULL AS call_sign, NULL AS imo_number,
                        NULL AS ship_type,
                        NULL AS length_overall, NULL AS beam,
-                       epoch(MIN(timestamp_utc))::BIGINT AS first_seen_utc,
-                       epoch(MAX(timestamp_utc))::BIGINT AS last_seen_utc
+                       MIN(timestamp_utc) AS first_seen_utc,
+                       MAX(timestamp_utc) AS last_seen_utc
                 FROM read_parquet({POS_GLOB}, hive_partitioning=true)
                 WHERE mmsi = $1
                 GROUP BY mmsi
@@ -385,7 +394,7 @@ async def vessel_detail(mmsi: int):
     name_history = []
     if _has_data(NAME_GLOB):
         name_history = _q(f"""
-            SELECT ship_name, epoch(timestamp_utc)::BIGINT AS timestamp_utc
+            SELECT ship_name, timestamp_utc
             FROM read_parquet({NAME_GLOB}, hive_partitioning=true)
             WHERE mmsi = $1
             ORDER BY timestamp_utc DESC
@@ -397,8 +406,8 @@ async def vessel_detail(mmsi: int):
     if _has_data(DEST_GLOB):
         dest = _q(f"""
             SELECT destination,
-                   epoch(eta_utc)::BIGINT AS eta_utc,
-                   epoch(timestamp_utc)::BIGINT AS timestamp_utc
+                   eta_utc,
+                   timestamp_utc
             FROM read_parquet({DEST_GLOB}, hive_partitioning=true)
             WHERE mmsi = $1
             ORDER BY timestamp_utc DESC
@@ -409,7 +418,7 @@ async def vessel_detail(mmsi: int):
     nav = []
     if _has_data(NAV_GLOB):
         nav_raw = _q(f"""
-            SELECT navigational_status, epoch(timestamp_utc)::BIGINT AS timestamp_utc
+            SELECT navigational_status, timestamp_utc
             FROM read_parquet({NAV_GLOB}, hive_partitioning=true)
             WHERE mmsi = $1
             ORDER BY timestamp_utc DESC
@@ -428,7 +437,7 @@ async def vessel_detail(mmsi: int):
     draught = []
     if _has_data(DRAUGHT_GLOB):
         draught = _q(f"""
-            SELECT draught, epoch(timestamp_utc)::BIGINT AS timestamp_utc
+            SELECT draught, timestamp_utc
             FROM read_parquet({DRAUGHT_GLOB}, hive_partitioning=true)
             WHERE mmsi = $1
             ORDER BY timestamp_utc DESC
@@ -477,17 +486,17 @@ async def vessel_track(
 
     if start is not None and end is not None:
         rows = _q(f"""
-            SELECT epoch(timestamp_utc)::BIGINT AS timestamp_utc,
+            SELECT timestamp_utc,
                    latitude, longitude,
                    speed_over_ground, course_over_ground, true_heading
             FROM read_parquet({POS_GLOB}, hive_partitioning=true)
             WHERE mmsi = $1
-              AND epoch(timestamp_utc)::BIGINT BETWEEN $2 AND $3
+              AND timestamp_utc BETWEEN $2 AND $3
             ORDER BY timestamp_utc
         """, [mmsi, start, end])
     else:
         rows = _q(f"""
-            SELECT epoch(timestamp_utc)::BIGINT AS timestamp_utc,
+            SELECT timestamp_utc,
                    latitude, longitude,
                    speed_over_ground, course_over_ground, true_heading
             FROM read_parquet({POS_GLOB}, hive_partitioning=true)
@@ -562,7 +571,7 @@ async def latest_positions(
     # Build latest positions
     rows = _q(f"""
         SELECT p.mmsi, NULL AS ship_name,
-               epoch(p.timestamp_utc)::BIGINT AS timestamp_utc,
+               p.timestamp_utc,
                p.latitude, p.longitude,
                p.speed_over_ground, p.course_over_ground, p.true_heading
         FROM (
@@ -752,8 +761,8 @@ async def db_metrics():
     time_range_val = None
     if _has_data(POS_GLOB):
         tr = _q1(f"""
-            SELECT epoch(MIN(timestamp_utc))::BIGINT AS ts_min,
-                   epoch(MAX(timestamp_utc))::BIGINT AS ts_max
+            SELECT MIN(timestamp_utc) AS ts_min,
+                   MAX(timestamp_utc) AS ts_max
             FROM read_parquet({POS_GLOB}, hive_partitioning=true)
         """)
         if tr and tr["ts_min"]:
@@ -763,9 +772,9 @@ async def db_metrics():
     positions_per_day = []
     if _has_data(POS_GLOB):
         positions_per_day = _q(f"""
-            SELECT CAST(timestamp_utc AS DATE) AS day, COUNT(*) AS cnt
+            SELECT to_timestamp(timestamp_utc)::DATE AS day, COUNT(*) AS cnt
             FROM read_parquet({POS_GLOB}, hive_partitioning=true)
-            GROUP BY CAST(timestamp_utc AS DATE)
+            GROUP BY to_timestamp(timestamp_utc)::DATE
             ORDER BY day DESC
             LIMIT 30
         """)
